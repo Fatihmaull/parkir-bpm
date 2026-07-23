@@ -55,6 +55,11 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		}
 	}))
 
+	// Daftar kendaraan aktif (IN_PREMISES) — untuk POS memilih transaksi & metrik.
+	app.Get("/api/v1/active", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"active": svc.Store().ActiveVehicles()})
+	})
+
 	// ── Field Monitor / mode simulator (§12.8) ──
 	sim := app.Group("/api/v1/sim")
 

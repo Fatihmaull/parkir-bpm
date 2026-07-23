@@ -155,7 +155,7 @@ func (c *Controller) State() State { return c.state }
 func (c *Controller) transition(to State) {
 	from := c.state
 	c.state = to
-	c.d.Emit("gate.state_changed", map[string]any{"from": string(from), "to": string(to)})
+	c.d.Emit("gate.state_changed", map[string]any{"gate": "entry", "from": string(from), "to": string(to)})
 }
 
 // Handle memproses satu event. Bounded — tidak pernah memblokir selain pada panggilan

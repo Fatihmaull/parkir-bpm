@@ -273,6 +273,33 @@ func (s *Store) Record(ctx context.Context, e audit.Event) error {
 	return nil
 }
 
+// ActiveVehicle — ringkasan kendaraan yang masih di dalam (IN_PREMISES).
+type ActiveVehicle struct {
+	ID          string    `json:"id"`
+	Ticket      string    `json:"ticket"`
+	VehicleType string    `json:"vehicle_type"`
+	Plate       string    `json:"plate"`
+	EntryTime   time.Time `json:"entry_time"`
+	IsMember    bool      `json:"is_member"`
+}
+
+// ActiveVehicles mengembalikan kendaraan berstatus IN_PREMISES (untuk POS & metrik).
+func (s *Store) ActiveVehicles() []ActiveVehicle {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ActiveVehicle
+	for _, v := range s.vehicles {
+		if v.status != "IN_PREMISES" {
+			continue
+		}
+		out = append(out, ActiveVehicle{
+			ID: v.id, Ticket: v.ticketCode, VehicleType: v.vehicleType,
+			Plate: v.plateIn, EntryTime: v.entryTime, IsMember: v.membershipID != "",
+		})
+	}
+	return out
+}
+
 // AuditEntries mengembalikan salinan rantai audit (untuk /health & test).
 func (s *Store) AuditEntries() []audit.Entry {
 	s.mu.Lock()

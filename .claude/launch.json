@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "apps/dashboard-web"],
+      "port": 5173
+    }
+  ]
+}

@@ -15,6 +15,7 @@ type Config struct {
 	SiteCode   string
 	Env        string
 	LogLevel   string
+	Store      string // memory|postgres — memory = jalan tanpa DB (demo/simulator, D12)
 
 	HTTPPort    int
 	DatabaseURL string
@@ -55,6 +56,7 @@ func Load() (*Config, error) {
 		SiteCode:        env("SITE_CODE", ""),
 		Env:             env("EDGE_ENV", "development"),
 		LogLevel:        env("EDGE_LOG_LEVEL", "info"),
+		Store:           env("EDGE_STORE", "memory"),
 		HTTPPort:        envInt("EDGE_API_PORT", 8080),
 		DatabaseURL:     env("EDGE_DATABASE_URL", ""),
 		JWTAccessSecret: env("JWT_ACCESS_SECRET", ""),
@@ -84,8 +86,8 @@ func Load() (*Config, error) {
 	if c.NodeID == "" {
 		return nil, fmt.Errorf("config: NODE_ID wajib diisi (rantai audit per-node, PRD §9.1)")
 	}
-	if c.DatabaseURL == "" {
-		return nil, fmt.Errorf("config: EDGE_DATABASE_URL wajib diisi")
+	if c.Store == "postgres" && c.DatabaseURL == "" {
+		return nil, fmt.Errorf("config: EDGE_DATABASE_URL wajib diisi saat EDGE_STORE=postgres")
 	}
 	if c.Env == "production" && len(c.JWTAccessSecret) < 32 {
 		return nil, fmt.Errorf("config: JWT_ACCESS_SECRET < 32 char di production (PRD §14)")

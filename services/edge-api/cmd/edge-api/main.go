@@ -1,8 +1,9 @@
 // edge-api — backend Edge Node. PRD §4.2: seluruh logika transaksi, state machine gerbang,
 // fare engine, audit chain, WS server untuk POS. "Boleh mati? Tidak — gerbang berhenti."
 //
-// Scaffold Minggu 1 (PRD §16.3): config, structured logging, health endpoint, graceful shutdown.
-// State machine, hardware bridge, fare engine, dan sync agent menyusul per timeline.
+// Mode saat ini: menjalankan gerbang masuk & keluar di atas SIMULATOR (P7) dengan penyimpanan
+// in-memory (memstore, D12). Repository pgx nyata menggantikan memstore saat DB tersedia,
+// tanpa mengubah logika (interface identik).
 package main
 
 import (
@@ -10,12 +11,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/config"
+	"github.com/jabar-creative/parkir/edge-api/internal/gate"
+	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
+	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
+	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
 )
 
 func main() {
@@ -25,39 +31,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := newLogger(cfg.LogLevel)
-	slog.SetDefault(logger)
-	slog.Info("edge-api mulai",
-		"node_id", cfg.NodeID, "env", cfg.Env,
+	slog.SetDefault(newLogger(cfg.LogLevel))
+	slog.Info("edge-api mulai", "node_id", cfg.NodeID, "env", cfg.Env,
 		"gate_in", cfg.GateIn.Transport, "gate_out", cfg.GateOut.Transport)
+
+	hub := wsbus.NewHub()
+	store := memstore.New(cfg.NodeID, time.Now)
+	// Seed tarif default agar fare engine berfungsi di mode demo.
+	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
+	store.SetRate("motor", gate.RateCard{BaseRate: 2000})
+
+	svc := gatesvc.New(gatesvc.Config{
+		NodeID: cfg.NodeID, TenantID: cfg.TenantCode, SiteID: cfg.SiteCode,
+		Site: gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000, LostTicketPenalty: 20000},
+	}, hub, store)
+	svc.Start()
+	defer svc.Close()
 
 	app := fiber.New(fiber.Config{
 		AppName:      "edge-api",
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	})
-
-	registerHealth(app, cfg)
-
-	// TODO(Minggu 1): repository layer + koneksi pgx pool.
-	// TODO(Minggu 2): state machine gerbang, WS /api/v1/stream, LPR gRPC client.
-	// TODO(Minggu 3): payment adapter, audit chain, CRON.
-	// TODO(Minggu 4): sync agent (outbox → Cloud).
+	registerRoutes(app, cfg, svc, hub)
 
 	go func() {
-		addr := ":" + itoa(cfg.HTTPPort)
+		addr := ":" + strconv.Itoa(cfg.HTTPPort)
 		slog.Info("HTTP listen", "addr", addr)
 		if err := app.Listen(addr); err != nil {
 			slog.Error("server berhenti", "err", err)
 		}
 	}()
 
-	// Graceful shutdown (NFR-2.3: pemulihan < 15 detik).
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	slog.Info("shutdown diminta")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := app.ShutdownWithContext(ctx); err != nil {
@@ -78,28 +87,5 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lvl = slog.LevelInfo
 	}
-	// PRD §14: structured logging, tanpa PII/PAN.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
 }

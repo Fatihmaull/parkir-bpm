@@ -69,14 +69,37 @@ parkir/
 
 ## Mulai Cepat (dev)
 
+**Mode simulator (tanpa DB, tanpa hardware — P7/D12).** `edge-api` dapat langsung dijalankan di atas
+simulator perangkat + penyimpanan in-memory:
+
+```bash
+cd services/edge-api
+NODE_ID=edge-dev EDGE_DATABASE_URL=postgres://x/y go run ./cmd/edge-api
+```
+
+Lalu gerakkan gerbang lewat endpoint Field Monitor (§12.8) — contoh siklus masuk:
+
+```bash
+curl -XPOST localhost:8080/api/v1/sim/entry/loop -d '{"loop":"pre","high":true}'   # LD1
+curl -XPOST localhost:8080/api/v1/sim/entry/button                                  # ambil tiket
+curl -XPOST localhost:8080/api/v1/sim/entry/ticket-taken                            # tiket diambil → palang buka
+curl -XPOST localhost:8080/api/v1/sim/entry/loop -d '{"loop":"post","high":true}'   # LD2 naik
+curl -XPOST localhost:8080/api/v1/sim/entry/loop -d '{"loop":"post","high":false}'  # LD2 turun → tutup
+curl localhost:8080/api/v1/health                                                   # lihat state + rantai audit
+```
+
+Event real-time via WebSocket: `ws://localhost:8080/api/v1/stream`.
+
+**Mode dengan PostgreSQL (produksi):**
+
 ```bash
 cp .env.example .env          # isi kredensial
 docker compose up -d edge-db  # PostgreSQL lokal
-# migrasi:
 goose -dir db/migrations postgres "$EDGE_DATABASE_URL" up
-# jalankan service (butuh Go terpasang):
-cd services/edge-api && go run ./cmd/edge-api
 ```
+
+> Repository pgx menggantikan memstore lewat interface yang identik (lihat `internal/memstore`) —
+> logika gerbang tidak berubah.
 
 ## Peran Tim & Timeline
 

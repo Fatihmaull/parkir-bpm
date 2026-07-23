@@ -1,0 +1,13 @@
+# Runtime gRPC
+grpcio==1.65.1
+grpcio-tools==1.65.1
+protobuf==5.27.2
+
+# Vision & OCR (dipasang Minggu 2) — versi disesuaikan saat model dikunci.
+# ultralytics==8.2.0      # YOLOv8
+# easyocr==1.7.1
+# opencv-python-headless==4.10.0.84
+# numpy==1.26.4
+
+# Dev/test
+pytest==8.3.2

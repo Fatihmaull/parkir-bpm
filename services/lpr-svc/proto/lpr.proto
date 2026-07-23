@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package lpr.v1;
+
+option go_package = "github.com/jabar-creative/parkir/edge-api/internal/lpr/lprpb";
+
+// LPR service — deteksi kendaraan + OCR plat. PRD §7.1. Deadline 1000 ms (NFR-1.1).
+service LPR {
+  rpc Recognize(RecognizeRequest) returns (RecognizeResponse);
+  rpc HealthCheck(HealthRequest) returns (HealthResponse);
+}
+
+message RecognizeRequest {
+  bytes  image      = 1;  // frame JPEG dari buffer RTSP terakhir
+  string gate_id    = 2;
+  int64  captured_at = 3; // epoch ms
+}
+
+message RecognizeResponse {
+  string raw_text          = 1; // output mentah OCR
+  string normalized_plate  = 2; // setelah normalisasi plat Indonesia
+  double confidence        = 3; // 0..1
+  string vehicle_type      = 4; // mobil|motor|truk|bus
+  string verdict           = 5; // AUTO_ACCEPT|NEEDS_REVIEW|UNREAD
+  int32  latency_ms        = 6;
+  string engine_version    = 7;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool   ok             = 1;
+  string engine_version = 2;
+}

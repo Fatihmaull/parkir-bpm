@@ -1,0 +1,10 @@
+{
+  "name": "@parkir/types",
+  "version": "0.1.0",
+  "description": "Tipe data bersama (kontrak) untuk edge-api, cloud-api, dashboard-web, pos-web. PRD §11.3 langkah 1.",
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED",
+  "private": true
+}

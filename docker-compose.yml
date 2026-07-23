@@ -1,0 +1,92 @@
+# PRD §4 topologi · NFR-5: seluruh layanan Docker, restart always.
+# Untuk dev lokal: `docker compose up -d edge-db cloud-db` cukup untuk mulai migrasi & coding.
+# Service Go (edge-api/cloud-api) di-build via Dockerfile masing-masing saat toolchain siap.
+
+services:
+  # ────────────── EDGE ──────────────
+  edge-db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-parkir}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_local}
+      POSTGRES_DB: ${POSTGRES_DB:-parkir_edge}
+    ports:
+      - "5432:5432"
+    volumes:
+      - edge_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-parkir}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  edge-api:
+    build:
+      context: ./services/edge-api
+    restart: always
+    depends_on:
+      edge-db:
+        condition: service_healthy
+    env_file: .env
+    ports:
+      - "${EDGE_API_PORT:-8080}:8080"
+    profiles: ["full"]        # opsional sampai Go terpasang
+
+  lpr-svc:
+    build:
+      context: ./services/lpr-svc
+    restart: always
+    ports:
+      - "50051:50051"
+    profiles: ["full"]
+
+  pos-web:
+    build:
+      context: ./apps/pos-web
+    restart: always
+    ports:
+      - "5173:80"
+    profiles: ["full"]
+
+  # ────────────── CLOUD ──────────────
+  cloud-db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-parkir}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_cloud}
+      POSTGRES_DB: parkir_cloud
+    ports:
+      - "5433:5432"
+    volumes:
+      - cloud_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-parkir}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cloud-api:
+    build:
+      context: ./services/cloud-api
+    restart: always
+    depends_on:
+      cloud-db:
+        condition: service_healthy
+    env_file: .env
+    ports:
+      - "${CLOUD_API_PORT:-9090}:9090"
+    profiles: ["full"]
+
+  dashboard-web:
+    build:
+      context: ./apps/dashboard-web
+    restart: always
+    ports:
+      - "5174:80"
+    profiles: ["full"]
+
+volumes:
+  edge_db_data:
+  cloud_db_data:

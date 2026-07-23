@@ -4,7 +4,21 @@
 // produksi (serial/tcp) dan simulator (sim, prinsip P7).
 package hardware
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// Kesalahan domain perangkat.
+var (
+	// ErrSafetyInterlock — palang menolak menutup karena loop bawah HIGH (P4, §5.3.4 #1).
+	ErrSafetyInterlock = errors.New("hardware: safety interlock — loop bawah HIGH, palang tolak tutup")
+	// ErrTerminalTimeout — EDC tidak merespons dalam batas waktu. BUKAN berarti gagal:
+	// pemanggil wajib LastBatch() untuk cek status sebenarnya (D8, §6.2.3 #2).
+	ErrTerminalTimeout = errors.New("hardware: EDC timeout — wajib cek LastBatch sebelum simpulkan gagal")
+	// ErrPaperOut — printer kehabisan kertas (§5.4.3).
+	ErrPaperOut = errors.New("hardware: printer kehabisan kertas")
+)
 
 type BarrierState int
 

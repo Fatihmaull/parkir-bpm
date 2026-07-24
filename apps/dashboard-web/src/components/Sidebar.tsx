@@ -52,7 +52,6 @@ export function Sidebar({ page, onNav }: { page: PageId; onNav: (p: PageId) => v
             >
               <span className="ic">{it.ic}</span>
               <span className="label">{it.label}</span>
-              {!it.live && <span className="soon">segera</span>}
             </div>
           ))}
         </div>

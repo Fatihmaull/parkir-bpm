@@ -269,6 +269,95 @@ func (s *Store) ValidateEntry(ctx context.Context, uid string) (gate.MemberDecis
 	return gate.MemberDecision{Allowed: true, MembershipID: m.id}, nil
 }
 
+// ── View untuk dashboard (§12) ──
+
+type TxnView struct {
+	ID          string    `json:"id"`
+	Ticket      string    `json:"ticket"`
+	VehicleType string    `json:"vehicle_type"`
+	PlateIn     string    `json:"plate_in"`
+	EntryTime   time.Time `json:"entry_time"`
+	Amount      int64     `json:"amount"`
+	Status      string    `json:"status"`
+	Flags       []string  `json:"flags"`
+}
+
+type PaymentView struct {
+	Method string `json:"method"`
+	Amount int64  `json:"amount"`
+	Status string `json:"status"`
+	TxID   string `json:"tx_id"`
+}
+
+type MemberView struct {
+	ID          string   `json:"id"`
+	RfidUID     string   `json:"rfid_uid"`
+	Plates      []string `json:"plates"`
+	VehicleType string   `json:"vehicle_type"`
+	ValidUntil  string   `json:"valid_until"`
+	Presence    string   `json:"presence"`
+	Status      string   `json:"status"`
+}
+
+// Transactions mengembalikan seluruh vehicles_log (untuk Catatan Keuangan & Volume §12.2/12.3).
+func (s *Store) TransactionViews() []TxnView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []TxnView
+	for _, v := range s.vehicles {
+		if v.status == "DRAFT" {
+			continue
+		}
+		out = append(out, TxnView{
+			ID: v.id, Ticket: v.ticketCode, VehicleType: v.vehicleType, PlateIn: v.plateIn,
+			EntryTime: v.entryTime, Amount: v.amount, Status: v.status, Flags: v.flags,
+		})
+	}
+	return out
+}
+
+func (s *Store) PaymentViews() []PaymentView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []PaymentView
+	for _, p := range s.payments {
+		out = append(out, PaymentView{Method: p.method, Amount: p.amount, Status: p.status, TxID: p.txID})
+	}
+	return out
+}
+
+func (s *Store) MemberViews() []MemberView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []MemberView
+	for _, m := range s.members {
+		status := "active"
+		if m.blocked {
+			status = "blocked"
+		} else if m.expired {
+			status = "expired"
+		}
+		out = append(out, MemberView{
+			ID: m.id, RfidUID: m.uid, Plates: m.plates, VehicleType: m.vehicleType,
+			ValidUntil: m.validUntil.Format("2006-01-02"), Presence: m.presence, Status: status,
+		})
+	}
+	return out
+}
+
+// OccupancyByType menghitung kendaraan IN_PREMISES per jenis (Mapping Slot §12.4).
+func (s *Store) OccupancyByType() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int{}
+	for _, v := range s.vehicles {
+		if v.status == "IN_PREMISES" {
+			out[v.vehicleType]++
+		}
+	}
+	return out
+}
+
 // ── CRON job logic (§8.3) — idempoten ──
 
 // ExpireMemberships menandai member yang valid_until < now sebagai kedaluwarsa. Kembalikan jumlah.

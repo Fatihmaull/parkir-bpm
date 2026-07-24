@@ -7,24 +7,22 @@ import { Overview } from "./pages/Overview";
 import { FieldMonitor } from "./pages/FieldMonitor";
 import { POS } from "./pages/POS";
 import { AuditLedger } from "./pages/AuditLedger";
-import { Stub } from "./pages/Stub";
-
-const STUB_TITLES: Partial<Record<PageId, string>> = {
-  finance: "Catatan Keuangan",
-  volume: "Volume & Jenis Kendaraan",
-  shift: "Rekonsiliasi Shift",
-  alerts: "Notifikasi & Alerts",
-  members: "RFID Memberships",
-  slots: "Mapping Slot Parkir",
-  location: "Konfigurasi Lahan",
-  hardware: "Hardware Config (COM)",
-};
+import { Finance } from "./pages/Finance";
+import { Volume } from "./pages/Volume";
+import { Slots } from "./pages/Slots";
+import { Location } from "./pages/Location";
+import { Hardware } from "./pages/Hardware";
+import { Alerts } from "./pages/Alerts";
+import { Shift } from "./pages/Shift";
+import { Members } from "./pages/Members";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("field");
   const health = useHealth();
   const { events, conn } = useStream();
   const online = true;
+  // tick bertambah tiap event WS → memicu refresh data halaman (transaksi, dsb.).
+  const tick = events.length;
 
   const entry = health?.gates.entry ?? "—";
   const exit = health?.gates.exit ?? "—";
@@ -39,7 +37,14 @@ export default function App() {
           {page === "field" && <FieldMonitor events={events} entry={entry} exit={exit} />}
           {page === "pos" && <POS events={events} exit={exit} online={online} />}
           {page === "audit" && <AuditLedger health={health} events={events} />}
-          {STUB_TITLES[page] && <Stub title={STUB_TITLES[page]!} />}
+          {page === "finance" && <Finance tick={tick} />}
+          {page === "volume" && <Volume tick={tick} />}
+          {page === "shift" && <Shift tick={tick} />}
+          {page === "alerts" && <Alerts events={events} />}
+          {page === "members" && <Members />}
+          {page === "slots" && <Slots tick={tick} />}
+          {page === "location" && <Location />}
+          {page === "hardware" && <Hardware health={health} tick={tick} />}
         </div>
       </div>
     </div>

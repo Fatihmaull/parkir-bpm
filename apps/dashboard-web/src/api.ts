@@ -17,6 +17,29 @@ export async function getHealth(): Promise<Health> {
   return res.json();
 }
 
+export async function getJSON<T = any>(path: string): Promise<T> {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  return res.json();
+}
+
+// useFetch — GET JSON dengan refresh saat `dep` berubah + interval opsional.
+export function useFetch<T = any>(path: string, dep: unknown = null, ms = 0): T | null {
+  const [data, setData] = useState<T | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = () => getJSON<T>(path).then((d) => alive && setData(d)).catch(() => {});
+    tick();
+    if (ms > 0) {
+      const id = setInterval(tick, ms);
+      return () => { alive = false; clearInterval(id); };
+    }
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, dep, ms]);
+  return data;
+}
+
 // useHealth — polling /health tiap `ms`.
 export function useHealth(ms = 3000): Health | null {
   const [h, setH] = useState<Health | null>(null);

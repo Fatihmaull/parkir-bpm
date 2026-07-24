@@ -66,6 +66,8 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		return c.JSON(fiber.Map{"active": svc.Store().ActiveVehicles()})
 	})
 
+	registerDashboardRoutes(app, cfg, svc)
+
 	// ── Field Monitor / mode simulator (§12.8) ──
 	sim := app.Group("/api/v1/sim")
 

@@ -43,6 +43,9 @@ func main() {
 	// Seed tarif default agar fare engine berfungsi di mode demo.
 	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
 	store.SetRate("motor", gate.RateCard{BaseRate: 2000})
+	// Seed member demo (registrasi RFID §8.1).
+	store.AddMember("04A1B2C3", []string{"D1234ABC"}, "mobil", time.Now().AddDate(1, 0, 0))
+	store.AddMember("04D4E5F6", []string{"D5678XYZ"}, "motor", time.Now().AddDate(0, 6, 0))
 
 	// Recognizer: mode demo memakai Stub berlabel (BUKAN model nyata; YOLOv8/EasyOCR = Fase 2, §17).
 	// Produksi menyuntik klien gRPC ke lpr-svc via LPR_GRPC_ADDR.

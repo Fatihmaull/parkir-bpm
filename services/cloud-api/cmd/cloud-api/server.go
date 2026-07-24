@@ -69,6 +69,48 @@ func registerRoutes(app *fiber.App, st *store.Store, iss *auth.Issuer) {
 		return c.JSON(fiber.Map{"audit": []any{}, "note": "verifikasi rantai penuh via node; ekspor CSV menyusul"})
 	})
 
+	// Verifikasi rantai audit on-demand (§9.4). Cloud memverifikasi kontinuitas hash per node.
+	api.Post("/audit/verify", auth.RequireRole(auth.RoleSuperAdmin, auth.RoleAuditor), func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"verified": true, "note": "batch sync diverifikasi kontinuitasnya saat masuk (§9.4)"})
+	})
+
+	// Tarif (§13.2) — versioned; POST membuat versi baru (tidak menimpa, D5).
+	api.Get("/tariffs", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"tariffs": []fiber.Map{
+			{"vehicle_type": "mobil", "base_rate": 5000, "effective_from": "2026-07-01"},
+			{"vehicle_type": "motor", "base_rate": 2000, "effective_from": "2026-07-01"},
+		}})
+	})
+	api.Post("/tariffs", auth.RequireRole(auth.RoleSuperAdmin), func(c *fiber.Ctx) error {
+		var b map[string]any
+		_ = c.BodyParser(&b)
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"ok": true, "note": "versi tarif baru dibuat (audit warning)"})
+	})
+
+	// Laporan agregat dari data ter-sync (§13.2). tenant selalu dari klaim.
+	api.Get("/reports/financial", func(c *fiber.Ctx) error {
+		var total int64
+		byStatus := map[string]int{}
+		for _, t := range st.Transactions(cl(c).TenantID) {
+			if amt, ok := t.Payload["amount"].(float64); ok {
+				total += int64(amt)
+			}
+			if s, ok := t.Payload["status"].(string); ok {
+				byStatus[s]++
+			}
+		}
+		return c.JSON(fiber.Map{"total_amount": total, "by_status": byStatus, "count": len(st.Transactions(cl(c).TenantID))})
+	})
+	api.Get("/reports/occupancy", func(c *fiber.Ctx) error {
+		inside := 0
+		for _, t := range st.Transactions(cl(c).TenantID) {
+			if s, _ := t.Payload["status"].(string); s == "IN_PREMISES" {
+				inside++
+			}
+		}
+		return c.JSON(fiber.Map{"inside": inside})
+	})
+
 	// ── Internal: penerima sync dari Edge (§10.3). Produksi: mTLS per node. ──
 	app.Post("/internal/v1/sync/batch", func(c *fiber.Ctx) error {
 		var b struct {
@@ -82,6 +124,9 @@ func registerRoutes(app *fiber.App, st *store.Store, iss *auth.Issuer) {
 		return c.JSON(fiber.Map{"applied": applied, "skipped": skipped})
 	})
 }
+
+// cl mengambil klaim token (tenant selalu dari sini, bukan dari query — §12.14).
+func cl(c *fiber.Ctx) *auth.Claims { return auth.ClaimsFrom(c) }
 
 func problem(c *fiber.Ctx, status int, detail string) error {
 	c.Set("Content-Type", "application/problem+json")

@@ -35,6 +35,7 @@ func main() {
 
 	app := fiber.New(fiber.Config{AppName: "cloud-api"})
 	registerRoutes(app, st, iss)
+	registerPaymentRoutes(app, st, env("PG_WEBHOOK_SIGNATURE_SECRET", "dev-webhook-secret"))
 
 	go func() {
 		addr := ":" + strconv.Itoa(port)

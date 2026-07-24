@@ -4,6 +4,7 @@
 package store
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/jabar-creative/parkir/cloud-api/internal/auth"
@@ -35,15 +36,63 @@ type Txn struct {
 	Payload     map[string]any `json:"payload"`
 }
 
+// Order — order pembayaran QRIS/e-wallet (§6.3).
+type Order struct {
+	OrderID  string `json:"order_id"`
+	Provider string `json:"provider"`
+	TenantID string `json:"tenant_id"`
+	Amount   int64  `json:"amount"`
+	Status   string `json:"status"` // PENDING|SETTLED
+	QRString string `json:"qr_string,omitempty"`
+}
+
 type Store struct {
-	mu    sync.RWMutex
-	users map[string]*User // key: email
-	sites []Site
-	txns  map[string]*Txn // key: aggregate_id (idempotensi §10.3)
+	mu     sync.RWMutex
+	users  map[string]*User // key: email
+	sites  []Site
+	txns   map[string]*Txn   // key: aggregate_id (idempotensi §10.3)
+	orders map[string]*Order // key: order_id (provider_ref, idempotensi webhook §6.3)
+	seq    int
 }
 
 func New() *Store {
-	return &Store{users: make(map[string]*User), txns: make(map[string]*Txn)}
+	return &Store{users: make(map[string]*User), txns: make(map[string]*Txn), orders: make(map[string]*Order)}
+}
+
+// CreateOrder membuat order PENDING dan mengembalikannya (order_id sebagai provider_ref).
+func (s *Store) CreateOrder(provider, tenantID string, amount int64, qr string) *Order {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seq++
+	o := &Order{
+		OrderID:  fmt.Sprintf("ORD-%s-%06d", provider, s.seq),
+		Provider: provider, TenantID: tenantID, Amount: amount, Status: "PENDING", QRString: qr,
+	}
+	s.orders[o.OrderID] = o
+	return o
+}
+
+// SettleOrder menyelesaikan order secara idempoten. Kembalikan (found, alreadySettled).
+// Webhook duplikat (PG sering kirim ulang) tidak boleh membuat pembayaran ganda (§6.3).
+func (s *Store) SettleOrder(orderID string) (found, alreadySettled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orders[orderID]
+	if !ok {
+		return false, false
+	}
+	if o.Status == "SETTLED" {
+		return true, true
+	}
+	o.Status = "SETTLED"
+	return true, false
+}
+
+func (s *Store) Order(orderID string) (*Order, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orders[orderID]
+	return o, ok
 }
 
 // ── seed ──

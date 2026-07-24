@@ -24,6 +24,7 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
 	"github.com/jabar-creative/parkir/edge-api/internal/lpr"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
+	"github.com/jabar-creative/parkir/edge-api/internal/syncagent"
 	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
 )
 
@@ -76,6 +77,19 @@ func main() {
 	}
 	c.Start()
 	defer c.Stop()
+
+	// Sync agent (§10.2) — jalan hanya bila endpoint Cloud dikonfigurasi. Cloud = tujuan
+	// replikasi, bukan dependensi runtime (P1): gerbang tetap jalan walau ini mati.
+	syncCtx, syncCancel := context.WithCancel(context.Background())
+	defer syncCancel()
+	if cfg.SyncEndpoint != "" {
+		sink := syncagent.NewHTTPSink(cfg.SyncEndpoint, cfg.TenantCode)
+		agent := syncagent.New(store.Outbox(), sink, cfg.SyncBatch)
+		go agent.Run(syncCtx, cfg.SyncTick)
+		slog.Info("sync agent aktif", "endpoint", cfg.SyncEndpoint, "tick", cfg.SyncTick)
+	} else {
+		slog.Info("sync agent nonaktif (SYNC_CLOUD_ENDPOINT kosong) — mode offline")
+	}
 
 	app := fiber.New(fiber.Config{
 		AppName:      "edge-api",

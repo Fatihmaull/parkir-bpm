@@ -10,9 +10,10 @@ linters:
     - staticcheck
     - ineffassign
     - unused
-    - misspell
     - gosimple
     - errcheck
+    # misspell sengaja TIDAK dipakai: komentar & pesan berbahasa Indonesia (mis. "operasional",
+    # "implementasi") dianggap salah eja oleh locale en-US.
 
 linters-settings:
   errcheck:

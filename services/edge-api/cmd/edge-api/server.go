@@ -28,7 +28,13 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 			"ws_subscribers": hub.Count(),
 			"sync":           fiber.Map{"state": "outbox", "pending": svc.Store().Outbox().PendingCount()},
 			"chain":          fiber.Map{"verified": chainOK, "entries": len(entries)},
+			"ocr":            fiber.Map{"count": len(svc.Store().OCRLogs())},
 		})
+	})
+
+	// Log OCR (§7.2, FR-7.7) — analitik akurasi LPR.
+	app.Get("/api/v1/ocr-logs", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"ocr_logs": svc.Store().OCRLogs()})
 	})
 
 	app.Get("/api/v1/gate/entry/state", func(c *fiber.Ctx) error {

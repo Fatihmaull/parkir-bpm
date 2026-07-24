@@ -22,6 +22,7 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/cronjobs"
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
 	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
+	"github.com/jabar-creative/parkir/edge-api/internal/lpr"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
 	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
 )
@@ -43,9 +44,16 @@ func main() {
 	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
 	store.SetRate("motor", gate.RateCard{BaseRate: 2000})
 
+	// Recognizer: mode demo memakai Stub berlabel (BUKAN model nyata; YOLOv8/EasyOCR = Fase 2, §17).
+	// Produksi menyuntik klien gRPC ke lpr-svc via LPR_GRPC_ADDR.
+	var rec lpr.Recognizer = lpr.Stub{Plate: "D1234ABC", Confidence: 0.91, EngineVersion: "stub-demo-no-model"}
+	if cfg.Store == "postgres" { // proxy: mode produksi → jangan palsukan OCR
+		rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
+	}
 	svc := gatesvc.New(gatesvc.Config{
 		NodeID: cfg.NodeID, TenantID: cfg.TenantCode, SiteID: cfg.SiteCode,
-		Site: gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000, LostTicketPenalty: 20000},
+		Site:       gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000, LostTicketPenalty: 20000},
+		Recognizer: rec, LPRDeadline: cfg.LPRDeadline,
 	}, hub, store)
 	svc.Start()
 	defer svc.Close()

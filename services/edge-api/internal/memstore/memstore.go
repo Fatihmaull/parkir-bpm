@@ -63,6 +63,7 @@ type Store struct {
 	auditLog []audit.Entry
 	ticketN  int
 	outbox   *outbox.Mem
+	ocrLogs  []OcrLog
 }
 
 func New(nodeID string, now func() time.Time) *Store {
@@ -326,6 +327,32 @@ func (s *Store) Record(ctx context.Context, e audit.Event) error {
 	}
 	s.auditLog = append(s.auditLog, entry)
 	return nil
+}
+
+// OcrLog — satu baris log OCR (§7.2). Ditulis SELALU, sukses maupun gagal.
+type OcrLog struct {
+	CapturedAt      time.Time `json:"captured_at"`
+	GateID          string    `json:"gate_id"`
+	RawText         string    `json:"raw_text"`
+	NormalizedPlate string    `json:"normalized_plate"`
+	Confidence      float64   `json:"confidence"`
+	Verdict         string    `json:"verdict"`
+	LatencyMs       int       `json:"latency_ms"`
+	EngineVersion   string    `json:"engine_version"`
+}
+
+// WriteOCR menyimpan satu baris ocr_logs.
+func (s *Store) WriteOCR(l OcrLog) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ocrLogs = append(s.ocrLogs, l)
+}
+
+// OCRLogs mengembalikan salinan ocr_logs (untuk analitik akurasi & UI).
+func (s *Store) OCRLogs() []OcrLog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]OcrLog(nil), s.ocrLogs...)
 }
 
 // ActiveVehicle — ringkasan kendaraan yang masih di dalam (IN_PREMISES).

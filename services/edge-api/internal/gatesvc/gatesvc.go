@@ -14,6 +14,7 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
 	hw "github.com/jabar-creative/parkir/edge-api/internal/hardware"
 	"github.com/jabar-creative/parkir/edge-api/internal/hardware/sim"
+	"github.com/jabar-creative/parkir/edge-api/internal/lpr"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
 	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
 )
@@ -52,6 +53,8 @@ type Service struct {
 	exitSim  *sim.Gate
 	store    *memstore.Store
 	hub      *wsbus.Hub
+	lpr      lpr.Recognizer
+	lprDL    time.Duration
 	etimer   gtimer
 	xtimer   gtimer
 	stop     chan struct{}
@@ -59,12 +62,14 @@ type Service struct {
 
 // Config untuk membangun Service.
 type Config struct {
-	NodeID   string
-	TenantID string
-	SiteID   string
-	Site     gate.SiteConfig
-	Online   func() bool
-	Now      func() time.Time
+	NodeID      string
+	TenantID    string
+	SiteID      string
+	Site        gate.SiteConfig
+	Online      func() bool
+	Now         func() time.Time
+	Recognizer  lpr.Recognizer // nil → Degraded (LPR tak tersedia, P2)
+	LPRDeadline time.Duration
 }
 
 // New membangun Service lengkap (in-memory) siap dijalankan.
@@ -75,11 +80,21 @@ func New(cfg Config, hub *wsbus.Hub, store *memstore.Store) *Service {
 	if cfg.Online == nil {
 		cfg.Online = func() bool { return true }
 	}
+	rec := cfg.Recognizer
+	if rec == nil {
+		rec = lpr.Degraded{EngineVersion: "degraded"} // LPR tak tersedia → UNREAD (P2)
+	}
+	dl := cfg.LPRDeadline
+	if dl <= 0 {
+		dl = time.Second // NFR-1.1
+	}
 	s := &Service{
 		entrySim: sim.NewGate(),
 		exitSim:  sim.NewGate(),
 		store:    store,
 		hub:      hub,
+		lpr:      rec,
+		lprDL:    dl,
 		stop:     make(chan struct{}),
 	}
 	s.etimer.fire = func(reason string) {
@@ -109,6 +124,9 @@ func New(cfg Config, hub *wsbus.Hub, store *memstore.Store) *Service {
 func (s *Service) Start() {
 	forwardLoop(s.entrySim.LoopPre.Subscribe(), s.stop, func(e hw.LoopEvent) {
 		s.FireEntry(gate.Event{Kind: gate.EvLD1, High: e.High})
+		if e.High {
+			go s.runLPR("GATE-IN-01") // snapshot LPR async, tidak menggerbang keputusan (§7.3)
+		}
 	})
 	forwardLoop(s.entrySim.LoopPost.Subscribe(), s.stop, func(e hw.LoopEvent) {
 		s.FireEntry(gate.Event{Kind: gate.EvLD2, High: e.High})
@@ -123,6 +141,9 @@ func (s *Service) Start() {
 	})
 	forwardLoop(s.exitSim.LoopPre.Subscribe(), s.stop, func(e hw.LoopEvent) {
 		s.FireExit(gate.XEvent{Kind: gate.XEvLD3, High: e.High})
+		if e.High {
+			go s.runLPR("GATE-OUT-01")
+		}
 	})
 	forwardLoop(s.exitSim.LoopPost.Subscribe(), s.stop, func(e hw.LoopEvent) {
 		s.FireExit(gate.XEvent{Kind: gate.XEvLD4, High: e.High})
@@ -130,6 +151,26 @@ func (s *Service) Start() {
 }
 
 func (s *Service) Close() { close(s.stop) }
+
+// runLPR memicu pengenalan plat, menulis ocr_logs (SELALU, §7.1), lalu memancarkan lpr.result.
+// Hasil tidak pernah menggerbang keputusan gerbang (P2/§7.3).
+func (s *Service) runLPR(gateID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.lprDL)
+	defer cancel()
+	res, err := s.lpr.Recognize(ctx, nil, gateID)
+	if err != nil {
+		res = lpr.Result{Verdict: lpr.VerdictUnread, EngineVersion: "error"}
+	}
+	s.store.WriteOCR(memstore.OcrLog{
+		CapturedAt: time.Now(), GateID: gateID, RawText: res.RawText,
+		NormalizedPlate: res.NormalizedPlate, Confidence: res.Confidence,
+		Verdict: string(res.Verdict), LatencyMs: res.LatencyMs, EngineVersion: res.EngineVersion,
+	})
+	s.hub.Publish("lpr.result", map[string]any{
+		"gate": gateID, "plate": res.NormalizedPlate, "confidence": res.Confidence,
+		"verdict": string(res.Verdict),
+	})
+}
 
 // FireEntry/FireExit menyerahkan satu event ke controller (diserialisasi).
 func (s *Service) FireEntry(e gate.Event) {

@@ -1,0 +1,28 @@
+# Konfigurasi golangci-lint dipakai kedua modul Go (working-directory diset di CI).
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - misspell
+    - gosimple
+    - errcheck
+
+linters-settings:
+  errcheck:
+    # Error yang sengaja diabaikan sudah ditandai `_ =`; abaikan pola tulis-ke-stream & Close.
+    check-type-assertions: false
+    check-blank: false
+    exclude-functions:
+      - (*github.com/gofiber/fiber/v2.Ctx).JSON
+      - (*github.com/gofiber/fiber/v2.Ctx).SendString
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

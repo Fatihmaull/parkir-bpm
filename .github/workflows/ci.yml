@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  edge-api:
+    name: edge-api (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/edge-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/edge-api/go.sum
+      - run: go mod download
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race + coverage)
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Build
+        run: go build ./...
+
+  cloud-api:
+    name: cloud-api (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/cloud-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/cloud-api/go.sum
+      - run: go mod download
+      - run: go vet ./...
+      - run: go test -race -coverprofile=coverage.out ./...
+      - run: go build ./...
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [services/edge-api, services/cloud-api]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.60
+          working-directory: ${{ matrix.module }}
+
+  lpr-svc:
+    name: lpr-svc (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/lpr-svc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Test (normalisasi plat §7.1)
+        run: python -m pytest -q
+
+  dashboard-web:
+    name: dashboard-web (React/TS)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/dashboard-web/package-lock.json
+      - run: npm ci
+      - name: Type-check
+        run: npx tsc -b --noEmit
+      - name: Build
+        run: npm run build

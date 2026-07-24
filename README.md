@@ -1,5 +1,7 @@
 # Smart Gate & Parking Management System
 
+[![CI](https://github.com/Fatihmaull/parkir-bpm/actions/workflows/ci.yml/badge.svg)](https://github.com/Fatihmaull/parkir-bpm/actions/workflows/ci.yml)
+
 Sistem manajemen gerbang & parkir _offline-first_, multi-tenant. Implementasi mengacu pada
 **PRD Pondasi v2.0.0** ([`docs/PRD_PONDASI.md`](docs/PRD_PONDASI.md)).
 

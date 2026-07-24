@@ -8,7 +8,10 @@ require (
 	github.com/google/uuid v1.6.0
 )
 
-require github.com/gofiber/contrib/websocket v1.3.4
+require (
+	github.com/gofiber/contrib/websocket v1.3.4
+	github.com/robfig/cron/v3 v3.0.1
+)
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect

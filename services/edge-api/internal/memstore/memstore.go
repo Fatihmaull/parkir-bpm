@@ -15,6 +15,7 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/audit"
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
 	"github.com/jabar-creative/parkir/edge-api/internal/ids"
+	"github.com/jabar-creative/parkir/edge-api/internal/outbox"
 )
 
 type vehicle struct {
@@ -31,13 +32,15 @@ type vehicle struct {
 }
 
 type member struct {
-	id          string
-	uid         string
-	plates      []string
-	vehicleType string
-	validUntil  time.Time
-	presence    string // IN|OUT
-	blocked     bool
+	id            string
+	uid           string
+	plates        []string
+	vehicleType   string
+	validUntil    time.Time
+	presence      string // IN|OUT
+	presenceSince time.Time
+	blocked       bool
+	expired       bool
 }
 
 type payment struct {
@@ -59,6 +62,7 @@ type Store struct {
 	chain    *audit.Chain
 	auditLog []audit.Entry
 	ticketN  int
+	outbox   *outbox.Mem
 }
 
 func New(nodeID string, now func() time.Time) *Store {
@@ -72,8 +76,12 @@ func New(nodeID string, now func() time.Time) *Store {
 		payments: make(map[string]*payment),
 		rates:    make(map[string]gate.RateCard),
 		chain:    audit.NewChain(nodeID, 0, ""),
+		outbox:   outbox.NewMem(),
 	}
 }
+
+// Outbox mengembalikan antrean sinkronisasi (untuk sync agent & /health).
+func (s *Store) Outbox() *outbox.Mem { return s.outbox }
 
 // ── seed helpers (untuk demo/test) ──
 
@@ -118,6 +126,11 @@ func (s *Store) CommitInPremises(ctx context.Context, txID, ticketCode, plate, m
 	if v.entryTime.IsZero() {
 		v.entryTime = s.now()
 	}
+	// Transactional outbox (§10.1): antrean sync ditulis "bersama" perubahan data.
+	s.outbox.Enqueue("vehicles_log", v.id, map[string]any{
+		"id": v.id, "status": v.status, "ticket_code": v.ticketCode,
+		"membership_id": v.membershipID, "entry_time": v.entryTime,
+	})
 	return nil
 }
 
@@ -181,6 +194,9 @@ func (s *Store) Complete(ctx context.Context, txID string, amount int64, plateOu
 	v.status = "COMPLETED"
 	v.amount = amount
 	v.flags = flags
+	s.outbox.Enqueue("vehicles_log", v.id, map[string]any{
+		"id": v.id, "status": v.status, "amount": v.amount, "flags": v.flags,
+	})
 	// Anti-passback: kendaraan member keluar → presence OUT (§8.2).
 	if v.membershipID != "" {
 		for _, m := range s.members {
@@ -248,7 +264,46 @@ func (s *Store) ValidateEntry(ctx context.Context, uid string) (gate.MemberDecis
 		return gate.MemberDecision{Allowed: false, Reason: "ANTIPASSBACK_VIOLATION"}, nil
 	}
 	m.presence = "IN" // tap masuk: OUT → IN
+	m.presenceSince = s.now()
 	return gate.MemberDecision{Allowed: true, MembershipID: m.id}, nil
+}
+
+// ── CRON job logic (§8.3) — idempoten ──
+
+// ExpireMemberships menandai member yang valid_until < now sebagai kedaluwarsa. Kembalikan jumlah.
+func (s *Store) ExpireMemberships(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, m := range s.members {
+		if !m.expired && !now.Before(m.validUntil) {
+			m.expired = true
+			n++
+		}
+	}
+	return n
+}
+
+// ResetStalePresence mereset member yang berstatus IN lebih dari `hours` jam → OUT (§8.2).
+func (s *Store) ResetStalePresence(now time.Time, hours int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	cutoff := now.Add(-time.Duration(hours) * time.Hour)
+	for _, m := range s.members {
+		if m.presence == "IN" && !m.presenceSince.IsZero() && m.presenceSince.Before(cutoff) {
+			m.presence = "OUT"
+			n++
+		}
+	}
+	return n
+}
+
+// VerifyChain memverifikasi rantai audit penuh (§9.4). Kembalikan (brokenSeq, ok).
+func (s *Store) VerifyChain() (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return audit.Verify(s.auditLog)
 }
 
 // ── gate.Tariffs ──

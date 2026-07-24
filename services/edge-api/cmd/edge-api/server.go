@@ -26,7 +26,7 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 				"exit":  string(svc.ExitState()),
 			},
 			"ws_subscribers": hub.Count(),
-			"sync":           fiber.Map{"state": "n/a-memstore", "pending": 0},
+			"sync":           fiber.Map{"state": "outbox", "pending": svc.Store().Outbox().PendingCount()},
 			"chain":          fiber.Map{"verified": chainOK, "entries": len(entries)},
 		})
 	})

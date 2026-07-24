@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/robfig/cron/v3"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/config"
+	"github.com/jabar-creative/parkir/edge-api/internal/cronjobs"
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
 	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
@@ -47,6 +49,22 @@ func main() {
 	}, hub, store)
 	svc.Start()
 	defer svc.Close()
+
+	// CRON 6 job (§8.3) — idempoten, dijadwalkan robfig/cron.
+	c := cron.New()
+	if err := cronjobs.Register(c, &cronjobs.Deps{
+		Now:              time.Now,
+		ResetHours:       18,
+		ExpireMembership: store.ExpireMemberships,
+		ResetPresence:    store.ResetStalePresence,
+		RetryOutbox:      store.Outbox().RequeueFailed,
+		VerifyAudit:      store.VerifyChain,
+		Alert:            func(typ, sev, msg string) { hub.Publish("alert.raised", map[string]any{"type": typ, "severity": sev, "message": msg}) },
+	}); err != nil {
+		slog.Error("gagal register cron", "err", err)
+	}
+	c.Start()
+	defer c.Stop()
 
 	app := fiber.New(fiber.Config{
 		AppName:      "edge-api",

@@ -28,13 +28,18 @@ Filosofi mock (D12): seluruh sistem jalan tanpa PostgreSQL maupun perangkat fisi
 cd services/edge-api
 NODE_ID=edge-demo EDGE_STORE=memory go run ./cmd/edge-api      # :8080
 
-# Terminal 2 — dashboard
+# Terminal 2 — Cloud (untuk LOGIN dashboard — auth §14)
+cd services/cloud-api && go run ./cmd/cloud-api                # :9090
+
+# Terminal 3 — dashboard
 cd apps/dashboard-web
 npm install     # sekali
-npm run dev                                                     # :5173 (proxy /api → :8080)
+npm run dev                                                     # :5173 (proxy /api→:8080, /cloud→:9090)
 ```
 
-Buka **http://localhost:5173**. Event real-time via `ws://localhost:8080/api/v1/stream`.
+Buka **http://localhost:5173** → **layar Login** (demo: `admin@parkir.local` / `admin12345`,
+peran SuperAdmin). Event real-time via `ws://localhost:8080/api/v1/stream`. Menu tampil sesuai
+peran (Kasir: POS+Shift; Auditor: read-only; SuperAdmin: semua). Tombol tema terang/gelap di TopBar.
 
 ### Skrip demo klien (~1 menit)
 1. **Field Monitor** → klik ①→⑥ berurutan (kendaraan kasual masuk: LD1 → tombol → tiket →

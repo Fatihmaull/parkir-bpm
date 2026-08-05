@@ -1,10 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
-// Proxy /api → edge-api (localhost:8080), termasuk WebSocket /api/v1/stream.
-// Menghindari CORS: frontend & backend tampak satu origin di dev.
+// /api    → edge-api (:8080) — data operasional lokal + WebSocket.
+// /cloud  → cloud-api (:9090) — auth & agregat multi-tenant (prefix di-strip).
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
     proxy: {
@@ -12,6 +13,11 @@ export default defineConfig({
         target: process.env.EDGE_API_URL || "http://localhost:8080",
         changeOrigin: true,
         ws: true,
+      },
+      "/cloud": {
+        target: process.env.CLOUD_API_URL || "http://localhost:9090",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/cloud/, ""),
       },
     },
   },

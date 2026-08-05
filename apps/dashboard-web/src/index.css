@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+/* Dark mode berbasis kelas .dark pada <html> (toggle di TopBar). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", ui-monospace, monospace;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+}
+
+@layer components {
+  /* Kartu & panel */
+  .card {
+    @apply rounded-2xl border border-slate-200 bg-white p-4 shadow-sm
+           dark:border-slate-800 dark:bg-slate-900;
+  }
+  .card .label { @apply text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400; }
+  .card .value { @apply mt-1 text-2xl font-extrabold text-slate-900 dark:text-white; }
+  .card .sub { @apply mt-1 text-xs text-slate-400; }
+  .panel {
+    @apply rounded-2xl border border-slate-200 bg-white p-5 shadow-sm
+           dark:border-slate-800 dark:bg-slate-900;
+  }
+  .panel h3, .card h3 { @apply mb-3 text-sm font-semibold text-slate-900 dark:text-white; }
+
+  /* Grid helper */
+  .grid { @apply grid gap-4; }
+  .cards { @apply [grid-template-columns:repeat(auto-fill,minmax(210px,1fr))]; }
+  .row-2 { @apply grid gap-4 md:grid-cols-2; }
+  .gate { @apply flex flex-col gap-3.5; }
+
+  /* Badge / pill */
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold
+           border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300;
+  }
+  .badge .dot { @apply h-2 w-2 rounded-full bg-current; }
+  .badge.green { @apply border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300; }
+  .badge.amber { @apply border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300; }
+  .badge.red   { @apply border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300; }
+  .badge.gray  { @apply text-slate-500 dark:text-slate-400; }
+
+  /* Tombol */
+  .btn {
+    @apply cursor-pointer rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium
+           text-slate-700 transition hover:border-indigo-400 hover:text-indigo-600
+           dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-indigo-500 dark:hover:text-white;
+  }
+  .btn:active { @apply translate-y-px; }
+  .btn:disabled { @apply cursor-not-allowed opacity-40 hover:border-slate-200 dark:hover:border-slate-700; }
+  .btn.primary { @apply border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-500 hover:text-white; }
+  .btn.ok { @apply border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300; }
+  .btn.danger { @apply border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300; }
+  .btn-row { @apply flex flex-wrap gap-2; }
+
+  /* Input / select */
+  .select, .input {
+    @apply rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none
+           focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100;
+  }
+
+  /* State chip gerbang */
+  .state-chip {
+    @apply rounded-xl border px-4 py-2.5 text-center text-lg font-extrabold tracking-wide
+           border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-800;
+  }
+  .state-OPEN, .state-OPENING, .state-CLEARING, .state-PAID {
+    @apply border-emerald-300 bg-emerald-50 text-emerald-600 dark:border-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300;
+  }
+  .state-VEHICLE_PRESENT, .state-ISSUING, .state-AWAITING_PULL, .state-IDENTIFYING,
+  .state-TRANSACTION_FOUND, .state-FARE_CALCULATED, .state-AWAITING_PAYMENT {
+    @apply border-amber-300 bg-amber-50 text-amber-600 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-300;
+  }
+  .state-REJECTED, .state-FAULT, .state-LOCKED_NO_PAPER, .state-DISPUTE_HOLD {
+    @apply border-rose-300 bg-rose-50 text-rose-600 dark:border-rose-700 dark:bg-rose-950/30 dark:text-rose-300;
+  }
+
+  /* Lampu indikator */
+  .lamp-row { @apply flex gap-2.5; }
+  .lamp { @apply grid h-8 flex-1 place-items-center rounded-lg border border-slate-200 text-[11px] text-slate-400 dark:border-slate-700; }
+  .lamp.on-red { @apply border-rose-400 bg-rose-500/20 text-rose-600 dark:text-rose-300; }
+  .lamp.on-green { @apply border-emerald-400 bg-emerald-500/20 text-emerald-600 dark:text-emerald-300; }
+
+  /* Log event */
+  .log { @apply max-h-80 overflow-y-auto font-mono text-xs; }
+  .log .row { @apply flex gap-2.5 border-b border-slate-100 py-1 dark:border-slate-800; }
+  .log .ts { @apply whitespace-nowrap text-slate-400; }
+  .log .ev { @apply text-sky-600 dark:text-sky-300; }
+  .log .dt { @apply truncate text-slate-500 dark:text-slate-400; }
+
+  /* Tabel (bare table) */
+  table { @apply w-full border-collapse text-sm; }
+  th { @apply border-b border-slate-200 px-2.5 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:text-slate-400; }
+  td { @apply border-b border-slate-100 px-2.5 py-2 text-left dark:border-slate-800; }
+
+  .stub { @apply grid h-[60vh] place-items-center gap-2 text-center text-slate-400; }
+  .stub .big { @apply text-5xl; }
+}
+
+.muted { @apply text-slate-500 dark:text-slate-400; }
+.mono { font-family: var(--font-mono); }

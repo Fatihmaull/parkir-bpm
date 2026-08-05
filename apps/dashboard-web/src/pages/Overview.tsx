@@ -1,5 +1,6 @@
 import type { Health, WsEvent } from "../types";
 import { EventLog } from "./FieldMonitor";
+import { Donut, Bars, type Slice } from "../components/charts";
 
 type Ev = WsEvent & { t: number };
 
@@ -22,6 +23,17 @@ export function Overview({ health, events }: { health: Health | null; events: Ev
   const revenue = settled.reduce((s, e) => s + Number((e.data as any)?.amount ?? 0), 0);
   const inside = Math.max(0, entered - exited);
 
+  // Agregasi metode bayar (donut) & pendapatan per metode (bar).
+  const byMethod: Record<string, { count: number; amount: number }> = {};
+  for (const e of settled) {
+    const m = String((e.data as any)?.method || "LAIN");
+    byMethod[m] = byMethod[m] || { count: 0, amount: 0 };
+    byMethod[m].count++;
+    byMethod[m].amount += Number((e.data as any)?.amount ?? 0);
+  }
+  const methodDonut: Slice[] = Object.entries(byMethod).map(([label, v]) => ({ label, value: v.count }));
+  const methodBars: Slice[] = Object.entries(byMethod).map(([label, v]) => ({ label, value: v.amount }));
+
   return (
     <div className="grid" style={{ gap: 18 }}>
       <div className="grid cards">
@@ -29,6 +41,17 @@ export function Overview({ health, events }: { health: Health | null; events: Ev
         <Card label="Transaksi Hari Ini" value={String(settled.length)} sub="pembayaran ter-settle" />
         <Card label="Pendapatan Hari Ini" value={rupiah(revenue)} sub="akumulasi settlement" />
         <Card label="Kendaraan Masuk" value={String(entered)} sub="event masuk" />
+      </div>
+
+      <div className="row-2">
+        <div className="panel">
+          <h3>Komposisi Metode Bayar</h3>
+          <Donut data={methodDonut} />
+        </div>
+        <div className="panel">
+          <h3>Pendapatan per Metode</h3>
+          <Bars data={methodBars} />
+        </div>
       </div>
 
       <div className="row-2">

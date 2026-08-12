@@ -85,8 +85,8 @@ func (d *Device) Exec(ctx context.Context, cmd string) (string, error) {
 	var terakhir error
 
 	for percobaan := 1; percobaan <= d.maxAttempts; percobaan++ {
-		if d.guard != nil {
-			if err := d.guard(cmd); err != nil {
+		if g := d.commandGuard(); g != nil {
+			if err := g(cmd); err != nil {
 				return "", fmt.Errorf("tcpctl: perintah %s dibatalkan penjaga: %w", cmd, err)
 			}
 		}

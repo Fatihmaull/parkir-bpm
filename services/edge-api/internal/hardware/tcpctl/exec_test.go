@@ -14,7 +14,22 @@ import (
 type controllerPalsu struct {
 	diterima chan string
 	abaikan  atomic.Int32
+	stat     atomic.Value // string — balasan STAT yang dapat diatur tes
 }
+
+// balasan meniru §5.3: tiap perintah dibalas dirinya + "OK", kecuali STAT.
+func (c *controllerPalsu) balasan(cmd string) string {
+	if cmd != CmdStat {
+		return cmd + SuffixAck
+	}
+	if s, ok := c.stat.Load().(string); ok && s != "" {
+		return s
+	}
+	return "STAT10001000"
+}
+
+// setStat mengatur balasan STAT berikutnya.
+func (c *controllerPalsu) setStat(s string) { c.stat.Store(s) }
 
 func mulaiController(conn net.Conn) *controllerPalsu {
 	c := &controllerPalsu{diterima: make(chan string, 64)}
@@ -38,7 +53,7 @@ func mulaiController(conn net.Conn) *controllerPalsu {
 						c.abaikan.Add(-1)
 						continue // sengaja tidak membalas
 					}
-					if _, err := conn.Write(frame(balasanUntuk(cmd))); err != nil {
+					if _, err := conn.Write(frame(c.balasan(cmd))); err != nil {
 						return
 					}
 				}
@@ -49,14 +64,6 @@ func mulaiController(conn net.Conn) *controllerPalsu {
 		}
 	}()
 	return c
-}
-
-// balasanUntuk meniru §5.3: tiap perintah dibalas dirinya + "OK", kecuali STAT.
-func balasanUntuk(cmd string) string {
-	if cmd == CmdStat {
-		return "STAT10001000"
-	}
-	return cmd + SuffixAck
 }
 
 func opsiExecUji() []DeviceOption {

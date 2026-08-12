@@ -97,7 +97,11 @@ type Device struct {
 	maxMissedPing int
 	ackTimeout    time.Duration
 	maxAttempts   int
-	guard         func(cmd string) error
+
+	// guardMu menjaga guard: ia boleh dipasang setelah Device jalan (lihat
+	// SetCommandGuard) sementara Exec membacanya dari goroutine pemanggil.
+	guardMu sync.RWMutex
+	guard   func(cmd string) error
 
 	debounceWindow time.Duration
 	debounce       *Debouncer
@@ -233,6 +237,24 @@ func (d *Device) pancarkanLoop(ev hw.LoopEvent) {
 	case <-d.done:
 	}
 }
+
+// SetCommandGuard memasang atau mengganti penjaga perintah setelah Device dibuat.
+// nil melepasnya. Lihat WithCommandGuard untuk alasan keberadaannya.
+func (d *Device) SetCommandGuard(g func(cmd string) error) {
+	d.guardMu.Lock()
+	defer d.guardMu.Unlock()
+	d.guard = g
+}
+
+func (d *Device) commandGuard() func(string) error {
+	d.guardMu.RLock()
+	defer d.guardMu.RUnlock()
+	return d.guard
+}
+
+// LoopState melaporkan nilai input kanal ch yang sudah ter-debounce.
+// diketahui=false berarti belum ada pembacaan stabil sejak koneksi terakhir.
+func (d *Device) LoopState(ch int) (high, diketahui bool) { return d.debounce.Stable(ch) }
 
 // RFIDTaps mengalirkan tap kartu member dari pembaca Wiegand (PRD v3 §5.4).
 //

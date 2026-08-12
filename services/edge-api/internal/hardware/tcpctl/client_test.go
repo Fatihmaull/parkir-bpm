@@ -23,15 +23,28 @@ func mulaiPerangkatPalsu(t *testing.T) *perangkatPalsu {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	d := &perangkatPalsu{ln: ln, connCh: make(chan net.Conn, 1)}
+	d := &perangkatPalsu{ln: ln, connCh: make(chan net.Conn, 8)}
+	// Menerima berulang: uji reconnect (task 1.2) menyambung lagi ke listener yang sama.
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			d.connCh <- conn
 		}
-		d.connCh <- conn
 	}()
-	t.Cleanup(func() { _ = ln.Close() })
+	t.Cleanup(func() {
+		_ = ln.Close()
+		for {
+			select {
+			case c := <-d.connCh:
+				_ = c.Close()
+			default:
+				return
+			}
+		}
+	})
 	return d
 }
 

@@ -8,13 +8,18 @@ import (
 	"time"
 )
 
-// Nilai bawaan klien. Angka-angka reliabilitas lain (interval PING, ambang OFFLINE,
-// backoff reconnect) sengaja belum ada di sini — itu ranah task 1.2 & 1.3.
+// Nilai bawaan klien. Interval PING aplikasi dan ambang OFFLINE belum ada di sini —
+// itu ranah task 1.3.
 const (
 	defaultDialTimeout  = 3 * time.Second
 	defaultWriteTimeout = 2 * time.Second
 	defaultFrameBuffer  = 128
 	readChunkSize       = 512
+
+	// defaultKeepAlive — periode TCP keep-alive socket. Ini jaring pengaman lapisan
+	// transport untuk mendeteksi kabel tercabut / peer hilang tanpa FIN; deteksi cepat
+	// yang sesungguhnya memakai PING aplikasi tiap 1 dtk (task 1.3).
+	defaultKeepAlive = 15 * time.Second
 )
 
 // ErrClosed dikembalikan bila klien dipakai setelah Close.
@@ -27,8 +32,9 @@ var ErrClosed = errors.New("tcpctl: klien sudah ditutup")
 // dan TIDAK PERNAH dibuang diam-diam saat konsumen lambat — kanal akan menahan
 // pembaca, karena kehilangan event loop bawah berarti kehilangan dasar interlock (P4).
 //
-// Client tidak melakukan reconnect sendiri (task 1.2). Bila Frames() tertutup,
-// koneksi sudah mati dan pemanggil bertanggung jawab men-dial ulang.
+// Client sengaja hanya mewakili SATU koneksi dan tidak men-dial ulang sendiri: bila
+// Frames() tertutup, koneksi itu sudah mati. Pemakaian normal di lapangan lewat Device,
+// yang menyupervisi Client dan menyambung ulang dengan backoff.
 type Client struct {
 	addr string
 
@@ -47,6 +53,7 @@ type Client struct {
 
 	dialTimeout  time.Duration
 	writeTimeout time.Duration
+	keepAlive    time.Duration
 	frameBuffer  int
 }
 
@@ -63,6 +70,11 @@ func WithWriteTimeout(d time.Duration) Option {
 	return func(c *Client) { c.writeTimeout = d }
 }
 
+// WithKeepAlive mengatur periode TCP keep-alive socket. Nilai <= 0 mematikannya.
+func WithKeepAlive(d time.Duration) Option {
+	return func(c *Client) { c.keepAlive = d }
+}
+
 // WithFrameBuffer mengatur kedalaman antrian frame masuk.
 func WithFrameBuffer(n int) Option {
 	return func(c *Client) {
@@ -74,9 +86,6 @@ func WithFrameBuffer(n int) Option {
 
 // Dial membuka koneksi ke controller pada addr ("ip:port", bawaan port 56001 per
 // PRD v3 §5.1) dan menjalankan goroutine pembaca.
-//
-// TCP keep-alive socket mengikuti bawaan net.Dialer; penyetelannya bersama reconnect
-// dan backoff adalah task 1.2.
 func Dial(ctx context.Context, addr string, opts ...Option) (*Client, error) {
 	c := &Client{
 		addr:         addr,
@@ -84,13 +93,15 @@ func Dial(ctx context.Context, addr string, opts ...Option) (*Client, error) {
 		done:         make(chan struct{}),
 		dialTimeout:  defaultDialTimeout,
 		writeTimeout: defaultWriteTimeout,
+		keepAlive:    defaultKeepAlive,
 		frameBuffer:  defaultFrameBuffer,
 	}
 	for _, o := range opts {
 		o(c)
 	}
 
-	d := &net.Dialer{Timeout: c.dialTimeout}
+	// KeepAlive pada net.Dialer menyalakan SO_KEEPALIVE sekaligus menyetel periodenya.
+	d := &net.Dialer{Timeout: c.dialTimeout, KeepAlive: c.keepAlive}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err

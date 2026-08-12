@@ -14,9 +14,16 @@ func backoffUji() Backoff {
 	return Backoff{Min: time.Millisecond, Max: 5 * time.Millisecond, Factor: 2, Jitter: tanpaJitter}
 }
 
+// opsiDasarUji: backoff cepat, dan keepalive aplikasi dimatikan supaya tes siklus
+// koneksi (task 1.2) tidak tercampur PING otomatis. Tes keepalive sendiri ada di
+// keepalive_test.go dan menyalakannya kembali secara eksplisit.
+func opsiDasarUji() []DeviceOption {
+	return []DeviceOption{WithReconnectBackoff(backoffUji()), WithPingInterval(0)}
+}
+
 func mulaiDevice(t *testing.T, addr string, opts ...DeviceOption) *Device {
 	t.Helper()
-	semua := append([]DeviceOption{WithReconnectBackoff(backoffUji())}, opts...)
+	semua := append(opsiDasarUji(), opts...)
 	d := NewDevice(addr, semua...)
 
 	ctx, batal := context.WithCancel(context.Background())
@@ -184,7 +191,7 @@ func TestDeviceTerusMencobaSaatAlamatMati(t *testing.T) {
 
 func TestDeviceCloseMenutupKanalDanMenghentikanSupervisor(t *testing.T) {
 	p := mulaiPerangkatPalsu(t)
-	d := NewDevice(p.alamat(), WithReconnectBackoff(backoffUji()))
+	d := NewDevice(p.alamat(), opsiDasarUji()...)
 	d.Start(context.Background())
 	p.terima(t)
 
@@ -226,7 +233,7 @@ func TestDeviceCloseTanpaStart(t *testing.T) {
 
 func TestDevicePembatalanCtxMenghentikanSupervisor(t *testing.T) {
 	p := mulaiPerangkatPalsu(t)
-	d := NewDevice(p.alamat(), WithReconnectBackoff(backoffUji()))
+	d := NewDevice(p.alamat(), opsiDasarUji()...)
 	t.Cleanup(func() { _ = d.Close() })
 
 	ctx, batal := context.WithCancel(context.Background())

@@ -79,10 +79,11 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
+		// Injeksi sinkron: balasan harus memuat state SETELAH event diproses (lihat gatesvc).
 		if b.Loop == "post" {
-			svc.EntrySim().LoopPost.Drive(b.High)
+			svc.DriveEntryLoopPost(b.High)
 		} else {
-			svc.EntrySim().LoopPre.Drive(b.High)
+			svc.DriveEntryLoopPre(b.High)
 		}
 		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
 	})
@@ -97,11 +98,11 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
-		svc.EntrySim().RFID.SimTap(b.UID)
+		svc.TapEntryRFID(b.UID)
 		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
 	})
 	sim.Post("/entry/ticket-taken", func(c *fiber.Ctx) error {
-		svc.EntrySim().Printer.SimTake()
+		svc.TakeEntryTicket()
 		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
 	})
 
@@ -113,10 +114,11 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
+		// Injeksi sinkron: POS mengirim identify tepat setelah LD3 — state harus sudah bergerak.
 		if b.Loop == "post" {
-			svc.ExitSim().LoopPost.Drive(b.High)
+			svc.DriveExitLoopPost(b.High)
 		} else {
-			svc.ExitSim().LoopPre.Drive(b.High)
+			svc.DriveExitLoopPre(b.High)
 		}
 		return c.JSON(fiber.Map{"ok": true, "exit_state": string(svc.ExitState())})
 	})

@@ -97,11 +97,21 @@ type Device struct {
 	maxMissedPing int
 	ackTimeout    time.Duration
 	maxAttempts   int
-	guard         func(cmd string) error
+
+	// guardMu menjaga guard: ia boleh dipasang setelah Device jalan (lihat
+	// SetCommandGuard) sementara Exec membacanya dari goroutine pemanggil.
+	guardMu sync.RWMutex
+	guard   func(cmd string) error
 
 	debounceWindow time.Duration
 	debounce       *Debouncer
 	loopEvents     chan hw.LoopEvent
+	rfidTaps       chan hw.RFIDTap
+
+	telemetryCap       int
+	telemetryKeepalive bool
+	telemetry          *Ring
+	auditHook          func(TelemetryEntry)
 
 	frames   chan string
 	statusCh chan DeviceStatus
@@ -196,6 +206,7 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 		maxMissedPing: DefaultMaxMissedPing,
 		ackTimeout:    DefaultAckTimeout,
 		maxAttempts:   DefaultMaxAttempts,
+		telemetryCap:  DefaultTelemetryCap,
 		status:        StatusDisconnected,
 	}
 	for _, o := range opts {
@@ -204,8 +215,10 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 	d.frames = make(chan string, d.frameBuffer)
 	d.statusCh = make(chan DeviceStatus, defaultStatusBuffer)
 	d.loopEvents = make(chan hw.LoopEvent, d.frameBuffer)
+	d.rfidTaps = make(chan hw.RFIDTap, d.frameBuffer)
 	d.done = make(chan struct{})
 	d.debounce = NewDebouncer(d.debounceWindow, d.pancarkanLoop)
+	d.telemetry = NewRing(d.telemetryCap)
 	return d
 }
 
@@ -228,6 +241,44 @@ func (d *Device) LoopEvents() <-chan hw.LoopEvent { return d.loopEvents }
 func (d *Device) pancarkanLoop(ev hw.LoopEvent) {
 	select {
 	case d.loopEvents <- ev:
+	case <-d.done:
+	}
+}
+
+// SetCommandGuard memasang atau mengganti penjaga perintah setelah Device dibuat.
+// nil melepasnya. Lihat WithCommandGuard untuk alasan keberadaannya.
+func (d *Device) SetCommandGuard(g func(cmd string) error) {
+	d.guardMu.Lock()
+	defer d.guardMu.Unlock()
+	d.guard = g
+}
+
+func (d *Device) commandGuard() func(string) error {
+	d.guardMu.RLock()
+	defer d.guardMu.RUnlock()
+	return d.guard
+}
+
+// LoopState melaporkan nilai input kanal ch yang sudah ter-debounce.
+// diketahui=false berarti belum ada pembacaan stabil sejak koneksi terakhir.
+func (d *Device) LoopState(ch int) (high, diketahui bool) { return d.debounce.Stable(ch) }
+
+// RFIDTaps mengalirkan tap kartu member dari pembaca Wiegand (PRD v3 §5.4).
+//
+// Tidak ada penyaringan tap ganda di sini: kontrak tak menjaminnya dan penindakan
+// berulang adalah urusan state machine yang tahu konteks (kendaraan yang sama, tiket
+// yang sama). Driver hanya melaporkan apa yang dibaca perangkat.
+func (d *Device) RFIDTaps() <-chan hw.RFIDTap { return d.rfidTaps }
+
+// pancarkanTap meneruskan satu tap kartu ke konsumen. Sama seperti LoopEvent, tap
+// tidak pernah dibuang diam-diam — tap yang hilang berarti member gagal masuk.
+//
+// ctx ikut diawasi karena fungsi ini dipanggil dari jalur pompa frame: tanpa itu,
+// konsumen yang berhenti membaca akan mengunci pompa sampai Close().
+func (d *Device) pancarkanTap(ctx context.Context, tap hw.RFIDTap) {
+	select {
+	case d.rfidTaps <- tap:
+	case <-ctx.Done():
 	case <-d.done:
 	}
 }
@@ -298,9 +349,16 @@ func (d *Device) Send(ctx context.Context, cmd string) error {
 	case closed:
 		return ErrClosed
 	case c == nil:
+		d.catat(DirTX, cmd, SeverityWarning, "controller terputus — perintah tidak terkirim")
 		return ErrNotConnected
 	}
-	return c.Send(ctx, cmd)
+
+	if err := c.Send(ctx, cmd); err != nil {
+		d.catat(DirTX, cmd, SeverityWarning, "gagal menulis: "+err.Error())
+		return err
+	}
+	d.catat(DirTX, cmd, SeverityInfo, "")
+	return nil
 }
 
 // Close menghentikan supervisor, memutus koneksi, dan menunggu goroutine-nya selesai.
@@ -325,6 +383,7 @@ func (d *Device) Close() error {
 		// Supervisor tak pernah jalan, jadi tak ada yang akan menutup kanal.
 		d.debounce.Stop()
 		close(d.loopEvents)
+		close(d.rfidTaps)
 		close(d.frames)
 		close(d.statusCh)
 	}
@@ -340,6 +399,7 @@ func (d *Device) supervise(ctx context.Context) {
 		// menutup loopEvents sesudahnya aman.
 		d.debounce.Stop()
 		close(d.loopEvents)
+		close(d.rfidTaps)
 		close(d.statusCh)
 		close(d.frames)
 	}()
@@ -357,6 +417,7 @@ func (d *Device) supervise(ctx context.Context) {
 		)
 		if err != nil {
 			d.note(func(s *DeviceStats) { s.DialFailures++ })
+			d.catat(DirTX, "", SeverityWarning, "dial gagal: "+err.Error())
 			if !d.tunggu(ctx, d.backoff.Next()) {
 				return
 			}
@@ -442,6 +503,7 @@ func (d *Device) keepalive(ctx context.Context, c *Client) {
 
 			if int(d.missed.Add(1)) >= d.maxMissedPing {
 				d.note(func(s *DeviceStats) { s.Unresponsive++ })
+				d.catat(DirRX, "", SeverityCritical, "controller bisu — koneksi diputus paksa")
 				d.setStatus(StatusUnresponsive)
 				_ = c.Close() // paksa putus → supervisor men-dial ulang
 				return
@@ -462,7 +524,7 @@ func (d *Device) salurkan(ctx context.Context, c *Client) {
 			if !ok {
 				return // koneksi mati
 			}
-			if !d.amati(f) {
+			if !d.amati(ctx, f) {
 				continue
 			}
 			select {
@@ -487,7 +549,9 @@ func (d *Device) salurkan(ctx context.Context, c *Client) {
 // Hanya PINGOK yang me-nol-kan pencacah kesehatan, bukan sembarang lalu lintas masuk.
 // Kontrak §5.3 menyebut PING↔PINGOK secara khusus, dan controller yang hang masih
 // mungkin memuntahkan event lama dari buffer-nya — itu bukan bukti hidup.
-func (d *Device) amati(f string) bool {
+func (d *Device) amati(ctx context.Context, f string) bool {
+	d.catat(DirRX, f, SeverityInfo, "")
+
 	if f == RespPingOK {
 		d.missed.Store(0)
 		d.note(func(s *DeviceStats) { s.Pongs++ })
@@ -502,6 +566,9 @@ func (d *Device) amati(f string) bool {
 	// Frame mentahnya tetap diteruskan ke Frames() sebagai bahan diagnostik.
 	if ch, high, ok := ParseInput(f); ok {
 		d.debounce.Observe(ch, high)
+	}
+	if uid, _, ok := ParseWiegand(f); ok {
+		d.pancarkanTap(ctx, hw.RFIDTap{UID: uid, ReadAt: time.Now().UnixMilli()})
 	}
 
 	return f != RespPingOK // PINGOK tak pernah jadi konsumsi state machine

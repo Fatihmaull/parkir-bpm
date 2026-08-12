@@ -136,6 +136,81 @@ func ParseInput(f string) (ch int, high bool, ok bool) {
 	return ch, high, true
 }
 
+// ParseStat mem-parse balasan `STATabcdefgh` (PRD v3 §5.5): a–d adalah Input1–4,
+// e–h adalah Output1–4, masing-masing '1' atau '0'.
+//
+// §5.5 dan §13 mencatat semantik STAT masih menunggu konfirmasi vendor. Karena itu
+// parser ini menolak apa pun yang tidak persis berbentuk delapan digit biner alih-alih
+// menebak — lebih baik pemanggil tahu status tak terbaca daripada menerima nilai
+// karangan tentang posisi palang (P3).
+func ParseStat(f string) (inputs, outputs [ChannelMax]bool, ok bool) {
+	if !strings.HasPrefix(f, PrefixStatAck) {
+		return inputs, outputs, false
+	}
+	bit := f[len(PrefixStatAck):]
+	if len(bit) != 2*ChannelMax {
+		return inputs, outputs, false
+	}
+	for i := 0; i < len(bit); i++ {
+		var nilai bool
+		switch bit[i] {
+		case '1':
+			nilai = true
+		case '0':
+			nilai = false
+		default:
+			return [ChannelMax]bool{}, [ChannelMax]bool{}, false
+		}
+		if i < ChannelMax {
+			inputs[i] = nilai
+		} else {
+			outputs[i-ChannelMax] = nilai
+		}
+	}
+	return inputs, outputs, true
+}
+
+// Panjang muatan hex Wiegand yang dikenal kontrak (PRD v3 §5.4).
+const (
+	wiegand26Hex = 6 // W-26
+	wiegand34Hex = 8 // W-34
+)
+
+// ParseWiegand mem-parse event tap kartu `Wxxxxxx` (PRD v3 §5.4). Panjang muatan
+// membedakan format: 6 hex = W-26, 8 hex = W-34 (auto-deteksi).
+//
+// UID dikembalikan dalam huruf besar supaya pembanding di lapisan atas tidak perlu
+// menormalkan lagi — kartu yang sama tak boleh gagal cocok gara-gara beda kapitalisasi.
+func ParseWiegand(f string) (uid string, bits int, ok bool) {
+	if len(f) < 2 || f[0] != 'W' {
+		return "", 0, false
+	}
+	muatan := f[1:]
+
+	switch len(muatan) {
+	case wiegand26Hex:
+		bits = 26
+	case wiegand34Hex:
+		bits = 34
+	default:
+		return "", 0, false
+	}
+
+	huruf := make([]byte, len(muatan))
+	for i := 0; i < len(muatan); i++ {
+		c := muatan[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'A' && c <= 'F':
+			huruf[i] = c
+		case c >= 'a' && c <= 'f':
+			huruf[i] = c - 'a' + 'A'
+		default:
+			return "", 0, false // bukan hex → bukan event Wiegand yang sah
+		}
+	}
+	return string(huruf), bits, true
+}
+
 func checkChannel(ch int) error {
 	if ch < ChannelMin || ch > ChannelMax {
 		return fmt.Errorf("%w: %d", ErrChannelRange, ch)

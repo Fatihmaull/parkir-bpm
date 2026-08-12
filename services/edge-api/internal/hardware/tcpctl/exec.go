@@ -85,8 +85,8 @@ func (d *Device) Exec(ctx context.Context, cmd string) (string, error) {
 	var terakhir error
 
 	for percobaan := 1; percobaan <= d.maxAttempts; percobaan++ {
-		if d.guard != nil {
-			if err := d.guard(cmd); err != nil {
+		if g := d.commandGuard(); g != nil {
+			if err := g(cmd); err != nil {
 				return "", fmt.Errorf("tcpctl: perintah %s dibatalkan penjaga: %w", cmd, err)
 			}
 		}
@@ -137,6 +137,7 @@ func (d *Device) sekaliKirim(ctx context.Context, cmd string, cocok func(string)
 		return ack, nil
 	case <-t.C:
 		d.note(func(s *DeviceStats) { s.CommandTimeouts++ })
+		d.catat(DirTX, cmd, SeverityWarning, "balasan tidak datang dalam batas waktu")
 		return "", ErrAckTimeout
 	case <-ctx.Done():
 		return "", ctx.Err()

@@ -15,10 +15,13 @@ func newSvc(t *testing.T) (*Service, *wsbus.Hub, *memstore.Store) {
 	hub := wsbus.NewHub()
 	store := memstore.New("node-test", time.Now)
 	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
-	svc := New(Config{
+	svc, err := New(Config{
 		NodeID: "node-test", TenantID: "t1", SiteID: "s1",
 		Site: gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000},
 	}, hub, store)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	svc.Start()
 	t.Cleanup(svc.Close)
 	return svc, hub, store
@@ -30,20 +33,20 @@ func TestServiceEntryCycleAndAuditChain(t *testing.T) {
 	ch, un := hub.Subscribe()
 	defer un()
 
-	svc.FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
-	if svc.EntryState() != gate.StateVehiclePresent {
-		t.Fatalf("state=%s", svc.EntryState())
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
+	if gate.State(svc.EntryGate().State()) != gate.StateVehiclePresent {
+		t.Fatalf("state=%s", gate.State(svc.EntryGate().State()))
 	}
-	svc.FireEntry(gate.Event{Kind: gate.EvButton})
-	svc.FireEntry(gate.Event{Kind: gate.EvTicketTaken})
-	if svc.EntryState() != gate.StateOpen {
-		t.Fatalf("harus OPEN, state=%s", svc.EntryState())
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvButton})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvTicketTaken})
+	if gate.State(svc.EntryGate().State()) != gate.StateOpen {
+		t.Fatalf("harus OPEN, state=%s", gate.State(svc.EntryGate().State()))
 	}
-	svc.FireEntry(gate.Event{Kind: gate.EvLD1, High: false})
-	svc.FireEntry(gate.Event{Kind: gate.EvLD2, High: true})
-	svc.FireEntry(gate.Event{Kind: gate.EvLD2, High: false})
-	if svc.EntryState() != gate.StateIdle {
-		t.Fatalf("harus IDLE, state=%s", svc.EntryState())
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD1, High: false})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD2, High: true})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD2, High: false})
+	if gate.State(svc.EntryGate().State()) != gate.StateIdle {
+		t.Fatalf("harus IDLE, state=%s", gate.State(svc.EntryGate().State()))
 	}
 
 	// Rantai audit nyata harus terverifikasi.
@@ -65,10 +68,10 @@ func TestServiceEntryCycleAndAuditChain(t *testing.T) {
 // Event hardware tak-diminta (sim) diteruskan ke controller oleh goroutine forwarder.
 func TestServiceForwardsHardwareEvents(t *testing.T) {
 	svc, _, _ := newSvc(t)
-	svc.EntrySim().LoopPre.Drive(true) // simulasikan kendaraan tiba di LD1
+	svc.EntryGate().Sim().LoopPre.Drive(true) // simulasikan kendaraan tiba di LD1
 	// Tunggu forwarder menggerakkan state (async).
-	if !waitState(func() bool { return svc.EntryState() == gate.StateVehiclePresent }, time.Second) {
-		t.Fatalf("forwarder tidak menggerakkan state, state=%s", svc.EntryState())
+	if !waitState(func() bool { return gate.State(svc.EntryGate().State()) == gate.StateVehiclePresent }, time.Second) {
+		t.Fatalf("forwarder tidak menggerakkan state, state=%s", gate.State(svc.EntryGate().State()))
 	}
 }
 
@@ -77,21 +80,21 @@ func TestServiceMemberAntipassback(t *testing.T) {
 	svc, _, store := newSvc(t)
 	store.AddMember("04AABBCC", []string{"B1XYZ"}, "mobil", time.Now().Add(24*time.Hour))
 
-	svc.FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
-	svc.FireEntry(gate.Event{Kind: gate.EvRFID, UID: "04AABBCC"})
-	if svc.EntryState() != gate.StateOpen {
-		t.Fatalf("member pertama harus diterima (OPEN), state=%s", svc.EntryState())
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvRFID, UID: "04AABBCC"})
+	if gate.State(svc.EntryGate().State()) != gate.StateOpen {
+		t.Fatalf("member pertama harus diterima (OPEN), state=%s", gate.State(svc.EntryGate().State()))
 	}
 	// Selesaikan siklus.
-	svc.FireEntry(gate.Event{Kind: gate.EvLD1, High: false})
-	svc.FireEntry(gate.Event{Kind: gate.EvLD2, High: true})
-	svc.FireEntry(gate.Event{Kind: gate.EvLD2, High: false})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD1, High: false})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD2, High: true})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD2, High: false})
 
 	// Tap masuk lagi tanpa keluar → anti-passback menolak.
-	svc.FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
-	svc.FireEntry(gate.Event{Kind: gate.EvRFID, UID: "04AABBCC"})
-	if svc.EntryState() != gate.StateRejected {
-		t.Fatalf("tap kedua harus ditolak (REJECTED), state=%s", svc.EntryState())
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvRFID, UID: "04AABBCC"})
+	if gate.State(svc.EntryGate().State()) != gate.StateRejected {
+		t.Fatalf("tap kedua harus ditolak (REJECTED), state=%s", gate.State(svc.EntryGate().State()))
 	}
 }
 

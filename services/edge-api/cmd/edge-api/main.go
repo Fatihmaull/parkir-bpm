@@ -54,11 +54,17 @@ func main() {
 	if cfg.Store == "postgres" { // proxy: mode produksi → jangan palsukan OCR
 		rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
 	}
-	svc := gatesvc.New(gatesvc.Config{
+	// Daftar gerbang datang dari konfigurasi selama repository pgx (task 5.1) belum ada.
+	svc, err := gatesvc.New(gatesvc.Config{
 		NodeID: cfg.NodeID, TenantID: cfg.TenantCode, SiteID: cfg.SiteCode,
 		Site:       gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000, LostTicketPenalty: 20000},
 		Recognizer: rec, LPRDeadline: cfg.LPRDeadline,
+		Source: gatesvc.SpecsFromConfig(cfg),
 	}, hub, store)
+	if err != nil {
+		slog.Error("konfigurasi gerbang tidak sah", "err", err)
+		os.Exit(1)
+	}
 	svc.Start()
 	defer svc.Close()
 
@@ -71,7 +77,9 @@ func main() {
 		ResetPresence:    store.ResetStalePresence,
 		RetryOutbox:      store.Outbox().RequeueFailed,
 		VerifyAudit:      store.VerifyChain,
-		Alert:            func(typ, sev, msg string) { hub.Publish("alert.raised", map[string]any{"type": typ, "severity": sev, "message": msg}) },
+		Alert: func(typ, sev, msg string) {
+			hub.Publish("alert.raised", map[string]any{"type": typ, "severity": sev, "message": msg})
+		},
 	}); err != nil {
 		slog.Error("gagal register cron", "err", err)
 	}

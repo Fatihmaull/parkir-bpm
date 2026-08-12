@@ -45,11 +45,22 @@ func registerDashboardRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Se
 	})
 
 	// Hardware Config (§12.11): gerbang + transport + status.
+	// Daftarnya kini datang dari registry gerbang, bukan dua baris hardcoded, sehingga
+	// lahan dengan N gerbang tampil seluruhnya (task 2.1).
 	app.Get("/api/v1/devices", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"gates": []fiber.Map{
-			{"code": "GATE-IN-01", "kind": "ENTRY", "transport": cfg.GateIn.Transport, "endpoint": cfg.GateIn.Endpoint, "state": string(svc.EntryState())},
-			{"code": "GATE-OUT-01", "kind": "EXIT", "transport": cfg.GateOut.Transport, "endpoint": cfg.GateOut.Endpoint, "state": string(svc.ExitState())},
-		}})
+		specs := svc.Specs()
+		gates := make([]fiber.Map, 0, len(specs))
+		for _, s := range specs {
+			m := fiber.Map{
+				"code": s.Code, "kind": string(s.Kind),
+				"transport": s.Transport, "endpoint": s.Endpoint,
+			}
+			if r, ok := svc.Gate(s.Code); ok {
+				m["state"] = r.State()
+			}
+			gates = append(gates, m)
+		}
+		return c.JSON(fiber.Map{"gates": gates})
 	})
 
 	// RFID Memberships (§12.10) — list, register, bulk CSV (§12.13).

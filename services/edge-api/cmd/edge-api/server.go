@@ -17,14 +17,19 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 	app.Get("/api/v1/health", func(c *fiber.Ctx) error {
 		entries := svc.Store().AuditEntries()
 		_, chainOK := audit.Verify(entries)
+
+		// Status per gate_code — lahan boleh punya lebih dari satu gerbang masuk.
+		gates := fiber.Map{}
+		for _, spec := range svc.Specs() {
+			if r, ok := svc.Gate(spec.Code); ok {
+				gates[spec.Code] = fiber.Map{"kind": string(spec.Kind), "state": r.State()}
+			}
+		}
 		return c.JSON(fiber.Map{
-			"status":  "ok",
-			"node_id": cfg.NodeID,
-			"env":     cfg.Env,
-			"gates": fiber.Map{
-				"entry": string(svc.EntryState()),
-				"exit":  string(svc.ExitState()),
-			},
+			"status":         "ok",
+			"node_id":        cfg.NodeID,
+			"env":            cfg.Env,
+			"gates":          gates,
 			"ws_subscribers": hub.Count(),
 			"sync":           fiber.Map{"state": "outbox", "pending": svc.Store().Outbox().PendingCount()},
 			"chain":          fiber.Map{"verified": chainOK, "entries": len(entries)},
@@ -38,10 +43,10 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 	})
 
 	app.Get("/api/v1/gate/entry/state", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"state": string(svc.EntryState())})
+		return c.JSON(fiber.Map{"state": stateGerbang(svc.EntryGate())})
 	})
 	app.Get("/api/v1/gate/exit/state", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"state": string(svc.ExitState())})
+		return c.JSON(fiber.Map{"state": stateGerbang(svc.ExitGate())})
 	})
 
 	// ── WebSocket stream (§13.1) ──
@@ -67,8 +72,13 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 	})
 
 	registerDashboardRoutes(app, cfg, svc)
+	registerGateRoutes(app, svc)
 
 	// ── Field Monitor / mode simulator (§12.8) ──
+	//
+	// Jalur di bawah ini masih beralamat "entry"/"exit" tunggal dan hanya menyentuh
+	// gerbang PERTAMA tiap jenis. Ia dipertahankan supaya dashboard yang sudah ada tetap
+	// jalan; penggantinya yang beralamat gate_code ada di registerGateRoutes.
 	sim := app.Group("/api/v1/sim")
 
 	sim.Post("/entry/loop", func(c *fiber.Ctx) error {
@@ -80,16 +90,18 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 			return fiber.ErrBadRequest
 		}
 		// Injeksi sinkron: balasan harus memuat state SETELAH event diproses (lihat gatesvc).
-		if b.Loop == "post" {
-			svc.DriveEntryLoopPost(b.High)
-		} else {
-			svc.DriveEntryLoopPre(b.High)
+		r := svc.EntryGate()
+		if err := aksiGerbang(r, func() error { return r.DriveLoop(b.Loop, b.High) }); err != nil {
+			return err
 		}
-		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
+		return c.JSON(fiber.Map{"ok": true, "entry_state": stateGerbang(r)})
 	})
 	sim.Post("/entry/button", func(c *fiber.Ctx) error {
-		svc.FireEntry(gate.Event{Kind: gate.EvButton})
-		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
+		r := svc.EntryGate()
+		if err := aksiGerbang(r, func() error { return r.FireEntry(gate.Event{Kind: gate.EvButton}) }); err != nil {
+			return err
+		}
+		return c.JSON(fiber.Map{"ok": true, "entry_state": stateGerbang(r)})
 	})
 	sim.Post("/entry/rfid", func(c *fiber.Ctx) error {
 		var b struct {
@@ -98,12 +110,18 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
-		svc.TapEntryRFID(b.UID)
-		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
+		r := svc.EntryGate()
+		if err := aksiGerbang(r, func() error { return r.TapRFID(b.UID) }); err != nil {
+			return err
+		}
+		return c.JSON(fiber.Map{"ok": true, "entry_state": stateGerbang(r)})
 	})
 	sim.Post("/entry/ticket-taken", func(c *fiber.Ctx) error {
-		svc.TakeEntryTicket()
-		return c.JSON(fiber.Map{"ok": true, "entry_state": string(svc.EntryState())})
+		r := svc.EntryGate()
+		if err := aksiGerbang(r, r.TakeTicket); err != nil {
+			return err
+		}
+		return c.JSON(fiber.Map{"ok": true, "entry_state": stateGerbang(r)})
 	})
 
 	sim.Post("/exit/loop", func(c *fiber.Ctx) error {
@@ -115,12 +133,11 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 			return fiber.ErrBadRequest
 		}
 		// Injeksi sinkron: POS mengirim identify tepat setelah LD3 — state harus sudah bergerak.
-		if b.Loop == "post" {
-			svc.DriveExitLoopPost(b.High)
-		} else {
-			svc.DriveExitLoopPre(b.High)
+		r := svc.ExitGate()
+		if err := aksiGerbang(r, func() error { return r.DriveLoop(b.Loop, b.High) }); err != nil {
+			return err
 		}
-		return c.JSON(fiber.Map{"ok": true, "exit_state": string(svc.ExitState())})
+		return c.JSON(fiber.Map{"ok": true, "exit_state": stateGerbang(r)})
 	})
 	sim.Post("/exit/identify", func(c *fiber.Ctx) error {
 		var b struct {
@@ -131,15 +148,23 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
+		var ev gate.XEvent
 		switch {
 		case b.Ticket != "":
-			svc.FireExit(gate.XEvent{Kind: gate.XEvIdentifyTicket, Ticket: b.Ticket})
+			ev = gate.XEvent{Kind: gate.XEvIdentifyTicket, Ticket: b.Ticket}
 		case b.UID != "":
-			svc.FireExit(gate.XEvent{Kind: gate.XEvIdentifyRFID, UID: b.UID})
+			ev = gate.XEvent{Kind: gate.XEvIdentifyRFID, UID: b.UID}
 		case b.Plate != "":
-			svc.FireExit(gate.XEvent{Kind: gate.XEvIdentifyPlate, Plate: b.Plate})
+			ev = gate.XEvent{Kind: gate.XEvIdentifyPlate, Plate: b.Plate}
+		default:
+			return fiber.ErrBadRequest
 		}
-		return c.JSON(fiber.Map{"ok": true, "exit_state": string(svc.ExitState()), "amount": svc.ExitAmount()})
+		r := svc.ExitGate()
+		if err := aksiGerbang(r, func() error { return r.FireExit(ev) }); err != nil {
+			return err
+		}
+		amount, _ := r.Amount()
+		return c.JSON(fiber.Map{"ok": true, "exit_state": stateGerbang(r), "amount": amount})
 	})
 	sim.Post("/exit/photo", func(c *fiber.Ctx) error {
 		var b struct {
@@ -148,8 +173,13 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
-		svc.FireExit(gate.XEvent{Kind: gate.XEvPhotoVerdict, Match: b.Match})
-		return c.JSON(fiber.Map{"ok": true, "exit_state": string(svc.ExitState())})
+		r := svc.ExitGate()
+		if err := aksiGerbang(r, func() error {
+			return r.FireExit(gate.XEvent{Kind: gate.XEvPhotoVerdict, Match: b.Match})
+		}); err != nil {
+			return err
+		}
+		return c.JSON(fiber.Map{"ok": true, "exit_state": stateGerbang(r)})
 	})
 	sim.Post("/exit/pay", func(c *fiber.Ctx) error {
 		var b struct {
@@ -159,7 +189,31 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
-		svc.FireExit(gate.XEvent{Kind: gate.XEvPaymentSelect, Method: b.Method, Tendered: b.Tendered})
-		return c.JSON(fiber.Map{"ok": true, "exit_state": string(svc.ExitState())})
+		r := svc.ExitGate()
+		if err := aksiGerbang(r, func() error {
+			return r.FireExit(gate.XEvent{Kind: gate.XEvPaymentSelect, Method: b.Method, Tendered: b.Tendered})
+		}); err != nil {
+			return err
+		}
+		return c.JSON(fiber.Map{"ok": true, "exit_state": stateGerbang(r)})
 	})
+}
+
+// stateGerbang membaca state satu gerbang, aman bila gerbangnya tak ada.
+func stateGerbang(r *gatesvc.Runner) string {
+	if r == nil {
+		return ""
+	}
+	return r.State()
+}
+
+// aksiGerbang menjalankan aksi pada gerbang, menolak bila lahan tak punya gerbang itu.
+func aksiGerbang(r *gatesvc.Runner, f func() error) error {
+	if r == nil {
+		return fiber.NewError(fiber.StatusNotFound, "lahan tidak punya gerbang jenis ini")
+	}
+	if err := f(); err != nil {
+		return petakanError(err)
+	}
+	return nil
 }

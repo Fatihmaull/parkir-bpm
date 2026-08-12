@@ -22,10 +22,13 @@ func testApp(t *testing.T) (*fiber.App, *gatesvc.Service) {
 	hub := wsbus.NewHub()
 	store := memstore.New("node-http", time.Now)
 	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
-	svc := gatesvc.New(gatesvc.Config{
+	svc, err := gatesvc.New(gatesvc.Config{
 		NodeID: "node-http", TenantID: "t1", SiteID: "s1",
 		Site: gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000},
 	}, hub, store)
+	if err != nil {
+		t.Fatalf("gatesvc.New: %v", err)
+	}
 	svc.Start()
 	t.Cleanup(svc.Close)
 	app := fiber.New()
@@ -75,8 +78,8 @@ func TestSimLoopEndpointReturnsSettledState(t *testing.T) {
 	if m["exit_state"] != "IDENTIFYING" {
 		t.Fatalf("balasan LD3 harus IDENTIFYING (bukan state basi), got %v", m["exit_state"])
 	}
-	if svc.ExitState() != gate.XIdentifying {
-		t.Fatalf("state service setelah LD3 = %s, harus IDENTIFYING", svc.ExitState())
+	if gate.XState(svc.ExitGate().State()) != gate.XIdentifying {
+		t.Fatalf("state service setelah LD3 = %s, harus IDENTIFYING", gate.XState(svc.ExitGate().State()))
 	}
 
 	m = post(t, app, "/api/v1/sim/entry/loop", `{"loop":"pre","high":true}`)
@@ -91,11 +94,11 @@ func TestExitCycleOverHTTP(t *testing.T) {
 	app, svc := testApp(t)
 
 	// Buat satu kendaraan masuk (sinkron) → menghasilkan tiket TKT-000001, status IN_PREMISES.
-	svc.FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
-	svc.FireEntry(gate.Event{Kind: gate.EvButton})
-	svc.FireEntry(gate.Event{Kind: gate.EvTicketTaken})
-	if svc.EntryState() != gate.StateOpen {
-		t.Fatalf("persiapan: entry harus OPEN, got %s", svc.EntryState())
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvLD1, High: true})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvButton})
+	_ = svc.EntryGate().FireEntry(gate.Event{Kind: gate.EvTicketTaken})
+	if gate.State(svc.EntryGate().State()) != gate.StateOpen {
+		t.Fatalf("persiapan: entry harus OPEN, got %s", gate.State(svc.EntryGate().State()))
 	}
 
 	// LD3 (kendaraan tiba di gerbang keluar).

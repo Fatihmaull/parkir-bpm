@@ -61,6 +61,10 @@ type DeviceStats struct {
 	Pongs         uint64 // PINGOK yang diterima
 	Unresponsive  uint64 // koneksi diputus paksa karena PING tak dibalas
 	StatusDropped uint64 // perubahan status yang hilang karena konsumen lambat
+
+	Commands        uint64 // Exec yang berhasil mendapat balasan
+	CommandRetries  uint64 // pengulangan kirim karena balasan tak kunjung datang
+	CommandTimeouts uint64 // percobaan yang habis waktu menunggu balasan
 }
 
 // Device adalah koneksi yang menyembuhkan diri sendiri ke satu controller gerbang
@@ -89,6 +93,9 @@ type Device struct {
 	frameBuffer   int
 	pingInterval  time.Duration
 	maxMissedPing int
+	ackTimeout    time.Duration
+	maxAttempts   int
+	guard         func(cmd string) error
 
 	frames   chan string
 	statusCh chan DeviceStatus
@@ -98,6 +105,13 @@ type Device struct {
 	// missed dihitung oleh goroutine keepalive dan di-nol-kan oleh goroutine penyalur
 	// frame saat PINGOK tiba, jadi harus atomik.
 	missed atomic.Int32
+
+	// execMu menyerialkan Exec: protokol A6/A9 serial per koneksi, jadi hanya satu
+	// perintah boleh menunggu balasan pada satu waktu.
+	execMu sync.Mutex
+
+	pendMu sync.Mutex
+	pend   *penungguAck
 
 	mu      sync.Mutex
 	client  *Client
@@ -169,6 +183,8 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 		frameBuffer:   defaultFrameBuffer,
 		pingInterval:  DefaultPingInterval,
 		maxMissedPing: DefaultMaxMissedPing,
+		ackTimeout:    DefaultAckTimeout,
+		maxAttempts:   DefaultMaxAttempts,
 		status:        StatusDisconnected,
 	}
 	for _, o := range opts {
@@ -416,19 +432,24 @@ func (d *Device) salurkan(ctx context.Context, c *Client) {
 	}
 }
 
-// amati memperbarui pelacakan kesehatan dari satu frame masuk, dan melaporkan apakah
-// frame itu perlu diteruskan ke konsumen.
+// amati memperbarui pelacakan kesehatan dari satu frame masuk, menyerahkannya ke
+// perintah yang sedang menunggu balasan, dan melaporkan apakah frame itu perlu
+// diteruskan ke konsumen.
 //
-// Hanya PINGOK yang me-nol-kan pencacah, bukan sembarang lalu lintas masuk. Kontrak
-// §5.3 menyebut PING↔PINGOK secara khusus, dan controller yang hang masih mungkin
-// memuntahkan event lama dari buffer-nya — lalu lintas semacam itu bukan bukti hidup.
+// Hanya PINGOK yang me-nol-kan pencacah kesehatan, bukan sembarang lalu lintas masuk.
+// Kontrak §5.3 menyebut PING↔PINGOK secara khusus, dan controller yang hang masih
+// mungkin memuntahkan event lama dari buffer-nya — itu bukan bukti hidup.
 func (d *Device) amati(f string) bool {
-	if f != RespPingOK {
-		return true
+	if f == RespPingOK {
+		d.missed.Store(0)
+		d.note(func(s *DeviceStats) { s.Pongs++ })
 	}
-	d.missed.Store(0)
-	d.note(func(s *DeviceStats) { s.Pongs++ })
-	return false
+	// Pemeriksaan penunggu tetap dijalankan untuk PINGOK, supaya Exec(ctx, CmdPing)
+	// yang dipakai untuk probe manual tetap mendapat balasannya.
+	if d.serahkanAck(f) {
+		return false
+	}
+	return f != RespPingOK // PINGOK tak pernah jadi konsumsi state machine
 }
 
 // setStatus mencatat status baru dan menyiarkannya bila berubah.

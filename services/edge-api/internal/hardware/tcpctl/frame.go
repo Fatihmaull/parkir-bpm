@@ -136,6 +136,47 @@ func ParseInput(f string) (ch int, high bool, ok bool) {
 	return ch, high, true
 }
 
+// Panjang muatan hex Wiegand yang dikenal kontrak (PRD v3 §5.4).
+const (
+	wiegand26Hex = 6 // W-26
+	wiegand34Hex = 8 // W-34
+)
+
+// ParseWiegand mem-parse event tap kartu `Wxxxxxx` (PRD v3 §5.4). Panjang muatan
+// membedakan format: 6 hex = W-26, 8 hex = W-34 (auto-deteksi).
+//
+// UID dikembalikan dalam huruf besar supaya pembanding di lapisan atas tidak perlu
+// menormalkan lagi — kartu yang sama tak boleh gagal cocok gara-gara beda kapitalisasi.
+func ParseWiegand(f string) (uid string, bits int, ok bool) {
+	if len(f) < 2 || f[0] != 'W' {
+		return "", 0, false
+	}
+	muatan := f[1:]
+
+	switch len(muatan) {
+	case wiegand26Hex:
+		bits = 26
+	case wiegand34Hex:
+		bits = 34
+	default:
+		return "", 0, false
+	}
+
+	huruf := make([]byte, len(muatan))
+	for i := 0; i < len(muatan); i++ {
+		c := muatan[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'A' && c <= 'F':
+			huruf[i] = c
+		case c >= 'a' && c <= 'f':
+			huruf[i] = c - 'a' + 'A'
+		default:
+			return "", 0, false // bukan hex → bukan event Wiegand yang sah
+		}
+	}
+	return string(huruf), bits, true
+}
+
 func checkChannel(ch int) error {
 	if ch < ChannelMin || ch > ChannelMax {
 		return fmt.Errorf("%w: %d", ErrChannelRange, ch)

@@ -185,6 +185,62 @@ func (s *Service) FireExit(e gate.XEvent) {
 	_ = s.exit.Handle(context.Background(), e)
 }
 
+// ── Injeksi event perangkat SINKRON (Field Monitor / POS §12.8 & test) ──
+//
+// Jalur perangkat nyata bersifat asinkron: perangkat memancarkan event → goroutine
+// forwarder → Fire*. Untuk endpoint simulator jalur itu menimbulkan balapan: handler
+// HTTP memanggil sim.Drive lalu langsung membaca State() untuk balasannya, padahal
+// forwarder mungkin belum sempat jalan — balasan berisi state BASI dan aksi berikutnya
+// (mis. identify tepat setelah LD3) bisa tiba saat state machine masih IDLE.
+//
+// Metode di bawah menyuntik event langsung ke state machine di goroutine pemanggil:
+// state sim di-Set tanpa emit, sehingga event tidak terkirim dua kali. Saat kembali,
+// state machine dijamin sudah memproses event tersebut.
+
+func (s *Service) DriveEntryLoopPre(high bool) {
+	if !s.entrySim.LoopPre.Set(high) {
+		return
+	}
+	s.FireEntry(gate.Event{Kind: gate.EvLD1, High: high})
+	if high {
+		go s.runLPR("GATE-IN-01") // snapshot LPR async, tidak menggerbang keputusan (§7.3)
+	}
+}
+
+func (s *Service) DriveEntryLoopPost(high bool) {
+	if !s.entrySim.LoopPost.Set(high) {
+		return
+	}
+	s.FireEntry(gate.Event{Kind: gate.EvLD2, High: high})
+}
+
+func (s *Service) DriveExitLoopPre(high bool) {
+	if !s.exitSim.LoopPre.Set(high) {
+		return
+	}
+	s.FireExit(gate.XEvent{Kind: gate.XEvLD3, High: high})
+	if high {
+		go s.runLPR("GATE-OUT-01")
+	}
+}
+
+func (s *Service) DriveExitLoopPost(high bool) {
+	if !s.exitSim.LoopPost.Set(high) {
+		return
+	}
+	s.FireExit(gate.XEvent{Kind: gate.XEvLD4, High: high})
+}
+
+// TapEntryRFID & TakeEntryTicket: sim RFID/Printer tidak menyimpan state — keduanya
+// hanya memancarkan event — jadi cukup diteruskan langsung ke state machine.
+func (s *Service) TapEntryRFID(uid string) {
+	s.FireEntry(gate.Event{Kind: gate.EvRFID, UID: uid})
+}
+
+func (s *Service) TakeEntryTicket() {
+	s.FireEntry(gate.Event{Kind: gate.EvTicketTaken})
+}
+
 // Accessors untuk HTTP (Field Monitor §12.8) & test.
 func (s *Service) EntrySim() *sim.Gate       { return s.entrySim }
 func (s *Service) ExitSim() *sim.Gate        { return s.exitSim }

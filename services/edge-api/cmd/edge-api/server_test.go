@@ -65,6 +65,26 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+// Regresi: endpoint simulator harus membalas state SETELAH event diproses, bukan state basi.
+// Dulu handler memanggil sim.Drive (asinkron lewat goroutine forwarder) lalu langsung membaca
+// State(), sehingga balasan bisa berisi IDLE dan aksi berikutnya tiba terlalu cepat.
+func TestSimLoopEndpointReturnsSettledState(t *testing.T) {
+	app, svc := testApp(t)
+
+	m := post(t, app, "/api/v1/sim/exit/loop", `{"loop":"pre","high":true}`)
+	if m["exit_state"] != "IDENTIFYING" {
+		t.Fatalf("balasan LD3 harus IDENTIFYING (bukan state basi), got %v", m["exit_state"])
+	}
+	if svc.ExitState() != gate.XIdentifying {
+		t.Fatalf("state service setelah LD3 = %s, harus IDENTIFYING", svc.ExitState())
+	}
+
+	m = post(t, app, "/api/v1/sim/entry/loop", `{"loop":"pre","high":true}`)
+	if m["entry_state"] == "IDLE" {
+		t.Fatalf("balasan LD1 masih IDLE — state basi")
+	}
+}
+
 // Integrasi HTTP: siapkan kendaraan IN_PREMISES via entry (sync), lalu jalankan siklus KELUAR
 // penuh lewat endpoint HTTP dan pastikan palang keluar terbuka setelah bayar tunai.
 func TestExitCycleOverHTTP(t *testing.T) {

@@ -40,15 +40,29 @@ func (l *Loop) isHigh() bool {
 	return l.high
 }
 
-// Drive menyetel state loop (mensimulasikan kendaraan). Mengirim event ke subscriber
-// bila state berubah — sinyal dianggap sudah ter-debounce (kontrak §5.3.4 #3).
-func (l *Loop) Drive(high bool) {
+// Set menyetel state loop TANPA memancarkan event, dan melaporkan apakah state berubah.
+// Dipakai jalur injeksi sinkron (gatesvc.Drive*Loop*) yang mengirim event-nya sendiri
+// langsung ke state machine, sehingga pemanggil tidak balapan dengan goroutine forwarder.
+func (l *Loop) Set(high bool) bool {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.high == high {
-		l.mu.Unlock()
-		return
+		return false
 	}
 	l.high = high
+	return true
+}
+
+// Drive menyetel state loop (mensimulasikan kendaraan) lalu mengirim event ke subscriber
+// bila state berubah — sinyal dianggap sudah ter-debounce (kontrak §5.3.4 #3).
+// Pengiriman ke subscriber bersifat ASINKRON: konsumen adalah goroutine forwarder, jadi
+// state machine belum tentu bergerak saat Drive kembali. Pemanggil yang perlu membaca
+// state segera setelah event harus memakai gatesvc.Drive*Loop* (sinkron).
+func (l *Loop) Drive(high bool) {
+	if !l.Set(high) {
+		return
+	}
+	l.mu.Lock()
 	evt := hw.LoopEvent{LoopID: l.id, High: high, TS: time.Now().UnixMilli()}
 	subs := append([]chan hw.LoopEvent(nil), l.subs...)
 	l.mu.Unlock()

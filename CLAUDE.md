@@ -27,7 +27,8 @@ itu yang salah.**
 | edge-api (Go) | `services/edge-api/` | `go test ./...` · `golangci-lint run` |
 | cloud-api (Go) | `services/cloud-api/` | `go test ./...` |
 | lpr-svc (Python) | `services/lpr-svc/` | `pytest` |
-| Kontrak perangkat | `proto/device_protocol.md` | — |
+| Kontrak perangkat (sumber kebenaran) | `docs/PRD_v3_ENTERPRISE.md` §5–§6 — protokol A6/A9-TCP | — |
+| Kontrak perangkat (dok. lapangan) | `proto/device_protocol.md` — **DRAFT**, audiens tim instalasi, jangan dikirim keluar | — |
 | Tipe bersama | `packages/types/` | `tsc --noEmit` |
 
 Perintah umum tersedia di `Makefile` (`make db-up`, `make migrate`, `make test`).

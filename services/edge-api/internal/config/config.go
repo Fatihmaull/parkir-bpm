@@ -36,11 +36,15 @@ type Config struct {
 	SyncBatch    int
 }
 
-// GateConfig — transport & alamat controller gerbang (PRD §5.1).
+// GateConfig — transport & alamat controller gerbang (PRD v3 §5.1).
+// Controller A6/A9 adalah TCP server per gerbang; Edge menjadi client. RS232 (transport
+// "serial") sudah tidak dipakai sejak refine v3 — lihat proto/device_protocol.md §2.
 type GateConfig struct {
-	Transport string // serial|tcp|sim
-	Endpoint  string // "COM3" | "10.0.0.5:5001"
-	Addr      byte   // 0x01 / 0x02
+	Transport string // tcp|sim
+	Endpoint  string // "ip:port" controller, port default 56001 (mis. "192.168.1.11:56001")
+	// Addr adalah sisa kontrak v1.0 (byte ADDR pada frame STX/CRC). Protokol A6/A9 tidak
+	// memakai address — satu koneksi TCP per controller. Belum dibaca kode mana pun.
+	Addr byte
 }
 
 type TransportConfig struct {
@@ -66,12 +70,12 @@ func Load() (*Config, error) {
 		LPREngineVer:    env("LPR_ENGINE_VERSION", "unknown"),
 		GateIn: GateConfig{
 			Transport: env("GATE_IN_TRANSPORT", "sim"),
-			Endpoint:  env("GATE_IN_ENDPOINT", "COM3"),
+			Endpoint:  env("GATE_IN_ENDPOINT", "127.0.0.1:56001"),
 			Addr:      byte(envInt("GATE_IN_ADDR", 1)),
 		},
 		GateOut: GateConfig{
 			Transport: env("GATE_OUT_TRANSPORT", "sim"),
-			Endpoint:  env("GATE_OUT_ENDPOINT", "COM4"),
+			Endpoint:  env("GATE_OUT_ENDPOINT", "127.0.0.1:56001"),
 			Addr:      byte(envInt("GATE_OUT_ADDR", 2)),
 		},
 		EDC: TransportConfig{

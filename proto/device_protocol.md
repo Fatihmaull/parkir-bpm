@@ -238,5 +238,8 @@ sehingga tidak ada firmware kustom yang perlu ditulis. Rinciannya tetap dapat di
 - Interface Layer-2 (`Barrier`, `LoopDetector`, `IndicatorLight`, `RFIDReader`) — tidak berubah dari
   v2: `services/edge-api/internal/hardware/device.go`.
 - Simulator perangkat generik (prinsip P7): `services/edge-api/internal/hardware/sim/`.
-- Driver A6/A9 (`internal/hardware/tcpctl`) — **belum diimplementasikan**, lihat `docs/TASKS.md`
-  EPIK 1. Simulator TCP device (server A6/A9 palsu) menyusul di task 1.10.
+- Driver A6/A9 (`internal/hardware/tcpctl`) — **sebagian ada** (task 1.1–1.5: parser framing,
+  reconnect backoff, keepalive `PING`/`PINGOK`, korelasi perintah↔respons, debounce input),
+  diuji terhadap server TCP palsu di dalam test. **Belum** tersambung ke `gatesvc`: parser
+  Wiegand (1.6) dan implementasi interface Layer-2 (1.7) masih terbuka, sehingga transport
+  `tcp` belum dapat dipakai end-to-end. Lihat `docs/TASKS.md` EPIK 1.

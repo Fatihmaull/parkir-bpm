@@ -1,6 +1,18 @@
-// Package protocol mengimplementasikan Layer 1 (codec frame) dari kontrak perangkat PRD §5.3.
-// Format frame: STX | ADDR | CMD | LEN | PAYLOAD | CRC16(LE) | ETX.
-// CRC-16/MODBUS atas ADDR..PAYLOAD. Byte 0x02/0x03/0x10 dalam payload di-escape.
+// Package protocol adalah codec Layer 1 untuk kontrak perangkat **v1.0 (v2 PRD Pondasi §5.3)**:
+// STX | ADDR | CMD | LEN | PAYLOAD | CRC16(LE) | ETX, CRC-16/MODBUS atas ADDR..PAYLOAD,
+// byte 0x02/0x03/0x10 di payload di-escape.
+//
+// REFERENSI SAJA — TIDAK DIPAKAI KODE PRODUKSI.
+//
+// Kontrak itu dibatalkan pada refine v3: hardware nyata memakai protokol vendor A6/A9-TCP
+// (Header 0xA6 + ASCII + Footer 0xA9, tanpa LEN/CRC/address/stuffing). Lihat
+// docs/PRD_v3_ENTERPRISE.md §5 dan proto/device_protocol.md. Driver Layer-1 yang hidup adalah
+// internal/hardware/tcpctl (docs/TASKS.md EPIK 1 — belum diimplementasikan).
+//
+// Paket ini sengaja dipertahankan sebagai contoh framing, CRC-16/MODBUS dan byte-stuffing.
+// Jangan meng-import-nya dari jalur produksi.
+//
+// Seluruh rujukan § di berkas ini menunjuk ke docs/PRD_PONDASI.md (v2), bukan PRD v3.
 package protocol
 
 import (

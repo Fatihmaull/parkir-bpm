@@ -108,6 +108,11 @@ type Device struct {
 	loopEvents     chan hw.LoopEvent
 	rfidTaps       chan hw.RFIDTap
 
+	telemetryCap       int
+	telemetryKeepalive bool
+	telemetry          *Ring
+	auditHook          func(TelemetryEntry)
+
 	frames   chan string
 	statusCh chan DeviceStatus
 	done     chan struct{}
@@ -201,6 +206,7 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 		maxMissedPing: DefaultMaxMissedPing,
 		ackTimeout:    DefaultAckTimeout,
 		maxAttempts:   DefaultMaxAttempts,
+		telemetryCap:  DefaultTelemetryCap,
 		status:        StatusDisconnected,
 	}
 	for _, o := range opts {
@@ -212,6 +218,7 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 	d.rfidTaps = make(chan hw.RFIDTap, d.frameBuffer)
 	d.done = make(chan struct{})
 	d.debounce = NewDebouncer(d.debounceWindow, d.pancarkanLoop)
+	d.telemetry = NewRing(d.telemetryCap)
 	return d
 }
 
@@ -342,9 +349,16 @@ func (d *Device) Send(ctx context.Context, cmd string) error {
 	case closed:
 		return ErrClosed
 	case c == nil:
+		d.catat(DirTX, cmd, SeverityWarning, "controller terputus — perintah tidak terkirim")
 		return ErrNotConnected
 	}
-	return c.Send(ctx, cmd)
+
+	if err := c.Send(ctx, cmd); err != nil {
+		d.catat(DirTX, cmd, SeverityWarning, "gagal menulis: "+err.Error())
+		return err
+	}
+	d.catat(DirTX, cmd, SeverityInfo, "")
+	return nil
 }
 
 // Close menghentikan supervisor, memutus koneksi, dan menunggu goroutine-nya selesai.
@@ -403,6 +417,7 @@ func (d *Device) supervise(ctx context.Context) {
 		)
 		if err != nil {
 			d.note(func(s *DeviceStats) { s.DialFailures++ })
+			d.catat(DirTX, "", SeverityWarning, "dial gagal: "+err.Error())
 			if !d.tunggu(ctx, d.backoff.Next()) {
 				return
 			}
@@ -488,6 +503,7 @@ func (d *Device) keepalive(ctx context.Context, c *Client) {
 
 			if int(d.missed.Add(1)) >= d.maxMissedPing {
 				d.note(func(s *DeviceStats) { s.Unresponsive++ })
+				d.catat(DirRX, "", SeverityCritical, "controller bisu — koneksi diputus paksa")
 				d.setStatus(StatusUnresponsive)
 				_ = c.Close() // paksa putus → supervisor men-dial ulang
 				return
@@ -534,6 +550,8 @@ func (d *Device) salurkan(ctx context.Context, c *Client) {
 // Kontrak §5.3 menyebut PING↔PINGOK secara khusus, dan controller yang hang masih
 // mungkin memuntahkan event lama dari buffer-nya — itu bukan bukti hidup.
 func (d *Device) amati(ctx context.Context, f string) bool {
+	d.catat(DirRX, f, SeverityInfo, "")
+
 	if f == RespPingOK {
 		d.missed.Store(0)
 		d.note(func(s *DeviceStats) { s.Pongs++ })

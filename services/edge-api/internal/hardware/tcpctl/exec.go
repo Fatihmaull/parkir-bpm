@@ -137,6 +137,7 @@ func (d *Device) sekaliKirim(ctx context.Context, cmd string, cocok func(string)
 		return ack, nil
 	case <-t.C:
 		d.note(func(s *DeviceStats) { s.CommandTimeouts++ })
+		d.catat(DirTX, cmd, SeverityWarning, "balasan tidak datang dalam batas waktu")
 		return "", ErrAckTimeout
 	case <-ctx.Done():
 		return "", ctx.Err()

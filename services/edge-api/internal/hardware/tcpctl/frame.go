@@ -107,6 +107,35 @@ func Trig(ch int) (string, error) {
 	return fmt.Sprintf("TRIG%d", ch), nil
 }
 
+// ParseInput mem-parse event perubahan input `IN1ON`..`IN4OFF` (PRD v3 §5.4).
+// ok=false berarti frame bukan event input dan harus dibiarkan lewat apa adanya.
+func ParseInput(f string) (ch int, high bool, ok bool) {
+	const awalan = "IN"
+	if !strings.HasPrefix(f, awalan) {
+		return 0, false, false
+	}
+	sisa := f[len(awalan):]
+
+	switch {
+	case strings.HasSuffix(sisa, "OFF"):
+		sisa, high = sisa[:len(sisa)-len("OFF")], false
+	case strings.HasSuffix(sisa, "ON"):
+		sisa, high = sisa[:len(sisa)-len("ON")], true
+	default:
+		return 0, false, false
+	}
+
+	// Tepat satu digit kanal; apa pun selain itu bukan event input yang sah.
+	if len(sisa) != 1 || sisa[0] < '0' || sisa[0] > '9' {
+		return 0, false, false
+	}
+	ch = int(sisa[0] - '0')
+	if ch < ChannelMin || ch > ChannelMax {
+		return 0, false, false
+	}
+	return ch, high, true
+}
+
 func checkChannel(ch int) error {
 	if ch < ChannelMin || ch > ChannelMax {
 		return fmt.Errorf("%w: %d", ErrChannelRange, ch)

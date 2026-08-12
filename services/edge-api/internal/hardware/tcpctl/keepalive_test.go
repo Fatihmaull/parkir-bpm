@@ -52,12 +52,17 @@ func mulaiPenjawab(conn net.Conn) *penjawab {
 // diamkan menghentikan balasan PINGOK; socket sengaja dibiarkan terbuka.
 func (r *penjawab) diamkan() { r.bisu.Store(true) }
 
-// opsiKeepaliveUji: PING cepat supaya tes selesai dalam milidetik, bukan detik.
+// opsiKeepaliveUji: PING dipercepat supaya tes selesai dalam ratusan milidetik, bukan
+// detik. Ambang sengaja tidak seketat bawaan produksi — dengan interval 40 ms, ambang
+// 5 memberi 200 ms untuk satu rentetan round-trip loopback. Angka yang lebih ketat
+// membuat tes gagal di mesin CI yang sibuk padahal drivernya benar; perilaku ambang
+// itu sendiri diuji terpisah oleh TestDeviceJadiUnresponsiveSaatPingTakDibalas dan
+// TestDeviceBertahanDiBawahAmbangPingGagal.
 func opsiKeepaliveUji() []DeviceOption {
 	return []DeviceOption{
 		WithReconnectBackoff(backoffUji()),
-		WithPingInterval(20 * time.Millisecond),
-		WithMaxMissedPing(3),
+		WithPingInterval(40 * time.Millisecond),
+		WithMaxMissedPing(5),
 	}
 }
 
@@ -77,24 +82,39 @@ func TestKeepaliveMengirimPingBerkala(t *testing.T) {
 }
 
 // Controller yang membalas PING harus tetap ONLINE selamanya.
+//
+// Pengamatan berlangsung jauh lebih lama daripada jendela jatuh-tempo (5 × 50 ms =
+// 250 ms), jadi bila PINGOK tidak benar-benar me-nol-kan pencacah, status pasti jatuh
+// sebelum tes usai.
 func TestKeepalivePingokMenjagaStatusOnline(t *testing.T) {
 	p := mulaiPerangkatPalsu(t)
-	d := mulaiDevice(t, p.alamat(), opsiKeepaliveUji()...)
+	d := mulaiDevice(t, p.alamat(),
+		WithReconnectBackoff(backoffUji()),
+		WithPingInterval(50*time.Millisecond),
+		WithMaxMissedPing(5),
+	)
 	conn := p.terima(t)
 	r := mulaiPenjawab(conn)
 
+	// Koneksi diterima perangkat palsu belum berarti Device sempat menaikkan status.
 	tungguSampai(t, 3*time.Second, func() bool {
-		return d.Stats().Pongs >= 5
-	}, "beberapa PINGOK diterima")
+		return d.Status() == StatusOnline
+	}, "status naik ke ONLINE")
 
-	// Jauh melewati ambang 3× interval — kalau pelacakan salah, status sudah jatuh.
-	time.Sleep(150 * time.Millisecond)
-
-	if st := d.Status(); st != StatusOnline {
-		t.Fatalf("Status = %v, want ONLINE", st)
+	const pengamatan = 800 * time.Millisecond
+	tenggat := time.Now().Add(pengamatan)
+	for time.Now().Before(tenggat) {
+		if st := d.Status(); st != StatusOnline {
+			t.Fatalf("Status jatuh ke %v padahal controller membalas PING", st)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+
 	if got := d.Stats().Unresponsive; got != 0 {
 		t.Fatalf("Unresponsive = %d, want 0 selama controller membalas", got)
+	}
+	if got := d.Stats().Pongs; got < 5 {
+		t.Fatalf("Pongs = %d, want >= 5 dalam %v", got, pengamatan)
 	}
 	if r.pings.Load() == 0 {
 		t.Fatal("perangkat tidak menerima PING sama sekali")

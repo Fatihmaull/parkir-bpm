@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	hw "github.com/jabar-creative/parkir/edge-api/internal/hardware"
 )
 
 // ErrNotConnected dikembalikan bila perintah dikirim saat controller sedang terputus.
@@ -97,6 +99,10 @@ type Device struct {
 	maxAttempts   int
 	guard         func(cmd string) error
 
+	debounceWindow time.Duration
+	debounce       *Debouncer
+	loopEvents     chan hw.LoopEvent
+
 	frames   chan string
 	statusCh chan DeviceStatus
 	done     chan struct{}
@@ -173,6 +179,11 @@ func WithMaxMissedPing(n int) DeviceOption {
 	}
 }
 
+// WithDebounce mengatur jendela stabilitas input. Nilai <= 0 memakai DefaultDebounce.
+func WithDebounce(t time.Duration) DeviceOption {
+	return func(d *Device) { d.debounceWindow = t }
+}
+
 // NewDevice menyiapkan Device untuk controller di addr. Koneksi baru dimulai saat Start.
 func NewDevice(addr string, opts ...DeviceOption) *Device {
 	d := &Device{
@@ -192,8 +203,33 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 	}
 	d.frames = make(chan string, d.frameBuffer)
 	d.statusCh = make(chan DeviceStatus, defaultStatusBuffer)
+	d.loopEvents = make(chan hw.LoopEvent, d.frameBuffer)
 	d.done = make(chan struct{})
+	d.debounce = NewDebouncer(d.debounceWindow, d.pancarkanLoop)
 	return d
+}
+
+// LoopEvents mengalirkan perubahan input yang SUDAH ter-debounce, dalam bentuk
+// hw.LoopEvent — inilah yang dikonsumsi state machine gerbang.
+//
+// Frames() tetap membawa frame mentah termasuk INxON/INxOFF yang belum disaring; itu
+// pandangan diagnostik untuk halaman Hardware & telemetry (task 1.8), tempat teknisi
+// lapangan justru ingin melihat pantulan yang dibuang. Dua pandangan itu sengaja
+// dibedakan: yang satu apa adanya, yang satu sudah layak dipercaya.
+//
+// LoopEvent.LoopID saat ini berisi nomor kanal input (1..4) apa adanya. Pemetaannya ke
+// LD1..LD4 per gerbang mengikuti gates.config dan merupakan task 1.9.
+//
+// Event tidak pernah dibuang diam-diam: bila konsumen lambat, penyaring akan menahan
+// diri sampai event diterima atau Device berhenti.
+func (d *Device) LoopEvents() <-chan hw.LoopEvent { return d.loopEvents }
+
+// pancarkanLoop meneruskan event yang sudah stabil ke konsumen.
+func (d *Device) pancarkanLoop(ev hw.LoopEvent) {
+	select {
+	case d.loopEvents <- ev:
+	case <-d.done:
+	}
 }
 
 // Addr mengembalikan alamat controller.
@@ -287,6 +323,8 @@ func (d *Device) Close() error {
 		d.wg.Wait()
 	} else {
 		// Supervisor tak pernah jalan, jadi tak ada yang akan menutup kanal.
+		d.debounce.Stop()
+		close(d.loopEvents)
 		close(d.frames)
 		close(d.statusCh)
 	}
@@ -297,8 +335,14 @@ func (d *Device) Close() error {
 // tunggu sesuai backoff, ulangi.
 func (d *Device) supervise(ctx context.Context) {
 	defer d.wg.Done()
-	defer close(d.statusCh)
-	defer close(d.frames)
+	defer func() {
+		// Hentikan penyaring lebih dulu: Stop menjamin tak ada emit menyusul, sehingga
+		// menutup loopEvents sesudahnya aman.
+		d.debounce.Stop()
+		close(d.loopEvents)
+		close(d.statusCh)
+		close(d.frames)
+	}()
 
 	for {
 		if d.stopping(ctx) {
@@ -357,6 +401,10 @@ func (d *Device) supervise(ctx context.Context) {
 		d.stats.Disconnects++
 		d.mu.Unlock()
 		d.setStatus(StatusDisconnected)
+
+		// Selama Edge buta, kendaraan bisa datang atau pergi — keyakinan lama tentang
+		// posisi loop tak lagi berdasar. Lihat Debouncer.Reset.
+		d.debounce.Reset()
 
 		if d.stopping(ctx) {
 			return
@@ -449,6 +497,13 @@ func (d *Device) amati(f string) bool {
 	if d.serahkanAck(f) {
 		return false
 	}
+
+	// Event input mentah masuk penyaring; yang keluar dari sana adalah LoopEvent.
+	// Frame mentahnya tetap diteruskan ke Frames() sebagai bahan diagnostik.
+	if ch, high, ok := ParseInput(f); ok {
+		d.debounce.Observe(ch, high)
+	}
+
 	return f != RespPingOK // PINGOK tak pernah jadi konsumsi state machine
 }
 

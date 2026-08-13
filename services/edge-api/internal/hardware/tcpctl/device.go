@@ -67,6 +67,10 @@ type DeviceStats struct {
 	Commands        uint64 // Exec yang berhasil mendapat balasan
 	CommandRetries  uint64 // pengulangan kirim karena balasan tak kunjung datang
 	CommandTimeouts uint64 // percobaan yang habis waktu menunggu balasan
+
+	StatResyncs        uint64 // resync STAT yang berhasil dibaca & di-parse (3.2)
+	StatResyncFailures uint64 // resync STAT yang gagal atau balasannya tak terbaca
+	StatSeeded         uint64 // kanal input yang nilainya berasal dari potret STAT
 }
 
 // Device adalah koneksi yang menyembuhkan diri sendiri ke satu controller gerbang
@@ -78,13 +82,14 @@ type DeviceStats struct {
 // Device dihentikan. Dengan begitu lapisan di atasnya (state machine gerbang) tidak
 // perlu tahu-menahu soal siklus koneksi.
 //
-// Yang BELUM ditangani di sini, sesuai pembagian task: korelasi perintah↔respons
-// (1.4) dan resync STAT setelah pulih (3.2). Konsekuensi OFFLINE terhadap state
-// machine — gerbang ke FAULT, lampu merah, alert critical (PRD v3 §6.1 "watchdog per
-// device") — dipasang di lapisan gatesvc, bukan di driver ini.
+// Konsekuensi OFFLINE terhadap state machine — gerbang ke FAULT, lampu merah, alert
+// critical (PRD v3 §6.1 "watchdog per device") — dipasang di lapisan gatesvc, bukan di
+// driver ini.
 //
 // Setelah reconnect, status fisik palang & loop belum tentu sama dengan sebelum putus;
-// pemanggil tidak boleh menganggap state lamanya masih berlaku.
+// pemanggil tidak boleh menganggap state lamanya masih berlaku. Device berusaha
+// merekonstruksinya sendiri lewat resync STAT (3.2, lihat resync.go), tetapi
+// rekonstruksi itu bisa gagal — LoopState tetap dapat melaporkan "belum diketahui".
 type Device struct {
 	addr string
 
@@ -107,6 +112,7 @@ type Device struct {
 	debounce       *Debouncer
 	loopEvents     chan hw.LoopEvent
 	rfidTaps       chan hw.RFIDTap
+	statResync     bool
 
 	telemetryCap       int
 	telemetryKeepalive bool
@@ -129,12 +135,14 @@ type Device struct {
 	pendMu sync.Mutex
 	pend   *penungguAck
 
-	mu      sync.Mutex
-	client  *Client
-	status  DeviceStatus
-	started bool
-	closed  bool
-	stats   DeviceStats
+	mu            sync.Mutex
+	client        *Client
+	status        DeviceStatus
+	started       bool
+	closed        bool
+	stats         DeviceStats
+	lastStat      StatSnapshot
+	punyaLastStat bool
 }
 
 // DeviceOption menyetel perilaku Device.
@@ -194,6 +202,17 @@ func WithDebounce(t time.Duration) DeviceOption {
 	return func(d *Device) { d.debounceWindow = t }
 }
 
+// WithStatResync menyalakan atau mematikan rekonstruksi status lewat STAT pada setiap
+// koneksi yang terbentuk (task 3.2). Bawaannya menyala.
+//
+// Katup darurat yang sama alasannya dengan WithPingInterval: §5.5 & §13 PRD v3 mencatat
+// semantik STAT masih menunggu konfirmasi vendor. Bila controller di lapangan ternyata
+// membalas STAT dengan bentuk lain, resync hanya akan menghasilkan warning berulang
+// tanpa guna — matikan sementara sampai kontraknya dipastikan.
+func WithStatResync(aktif bool) DeviceOption {
+	return func(d *Device) { d.statResync = aktif }
+}
+
 // NewDevice menyiapkan Device untuk controller di addr. Koneksi baru dimulai saat Start.
 func NewDevice(addr string, opts ...DeviceOption) *Device {
 	d := &Device{
@@ -208,6 +227,7 @@ func NewDevice(addr string, opts ...DeviceOption) *Device {
 		maxAttempts:   DefaultMaxAttempts,
 		telemetryCap:  DefaultTelemetryCap,
 		status:        StatusDisconnected,
+		statResync:    true,
 	}
 	for _, o := range opts {
 		o(d)
@@ -448,6 +468,16 @@ func (d *Device) supervise(ctx context.Context) {
 			defer kw.Done()
 			d.keepalive(ctxKoneksi, c)
 		}()
+
+		// Rekonstruksi status harus berjalan BERSAMAAN dengan salurkan, bukan
+		// mendahuluinya — lihat resyncStat untuk alasannya.
+		if d.statResync {
+			kw.Add(1)
+			go func() {
+				defer kw.Done()
+				d.resyncStat(ctxKoneksi)
+			}()
+		}
 
 		d.salurkan(ctxKoneksi, c)
 

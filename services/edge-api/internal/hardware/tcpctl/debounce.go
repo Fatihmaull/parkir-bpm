@@ -86,6 +86,43 @@ func (d *Debouncer) Observe(ch int, high bool) {
 	})
 }
 
+// Seed menanamkan potret STAT sebagai nilai awal kanal ch tanpa menunggu jendela
+// stabilitas, dan melaporkan apakah nilai itu benar-benar dipasang.
+//
+// Hanya kanal yang BELUM punya nilai diakui yang diisi. Potret STAT diminta tepat
+// setelah koneksi pulih, tetapi balasannya bisa tiba SETELAH event INxON/INxOFF nyata
+// lebih dulu masuk lewat jalur frame — artinya potret itu lebih tua daripada apa yang
+// sudah diketahui. Menimpanya akan memundurkan status ke masa lalu.
+//
+// Hitungan mundur yang sedang berjalan sengaja TIDAK dibatalkan: ia berasal dari
+// pembacaan nyata yang lebih baru, dan stabilkan akan menimpa nilai seed ini begitu
+// jendelanya habis. Seed hanya memberi dasar sementara, bukan kata akhir.
+func (d *Debouncer) Seed(ch int, high bool) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return false
+	}
+
+	k := d.kanal[ch]
+	if k == nil {
+		k = &kanalInput{}
+		d.kanal[ch] = k
+	}
+	if k.punyaStabil {
+		return false
+	}
+
+	k.stabil = high
+	k.punyaStabil = true
+	// Jangan sentuh calon bila ada timer berjalan — itu milik pembacaan nyata yang
+	// sedang dihitung mundur dan harus tetap menang.
+	if k.timer == nil {
+		k.calon = high
+	}
+	return true
+}
+
 // Stable melaporkan nilai kanal yang sudah diakui.
 func (d *Debouncer) Stable(ch int) (high, diketahui bool) {
 	d.mu.Lock()
@@ -104,7 +141,7 @@ func (d *Debouncer) Stable(ch int) (high, diketahui bool) {
 // sehingga keyakinan lama tentang posisi loop tidak lagi punya dasar. Melupakannya
 // membuat pembacaan pertama setelah pulih selalu diakui ulang, alih-alih ditelan
 // karena "sama dengan nilai lama". Rekonstruksi status yang sesungguhnya lewat STAT
-// adalah task 3.2.
+// dikerjakan Device.resyncStat (task 3.2), yang mengisi ulang kanal lewat Seed.
 func (d *Debouncer) Reset() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -155,13 +192,19 @@ func (d *Debouncer) stabilkan(ch int, high bool) {
 		d.mu.Unlock()
 		return // nilainya berubah lagi sebelum sempat stabil
 	}
+	// Nilai yang sudah diakui tidak diumumkan dua kali. Lewat Observe saja hal ini
+	// tak mungkin terjadi (Observe membatalkan timer begitu nilainya kembali ke yang
+	// diakui), tetapi Seed dapat menanamkan nilai yang sama saat hitungan mundur nyata
+	// masih berjalan — tanpa penjaga ini state machine menerima dua tepi naik untuk
+	// satu kendaraan.
+	sama := k.punyaStabil && k.stabil == high
 	k.stabil = high
 	k.punyaStabil = true
 	k.timer = nil
 	emit := d.emit
 	d.mu.Unlock()
 
-	if emit != nil {
+	if emit != nil && !sama {
 		emit(hw.LoopEvent{LoopID: ch, High: high, TS: time.Now().UnixMilli()})
 	}
 }

@@ -40,13 +40,18 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ✅ 2.3 Interlock keselamatan ditegakkan di jalur driver nyata — `tcpctl.Barrier.Close` +
   penjaga perintah di dalam gelang retry (PR #3). Tidak berlaku pada `barrier_mode: pulse`
   (palang turun oleh mekanismenya sendiri; Edge tak punya perintah tutup).
-- ⬜ 2.4 Timer pengaman Edge: auto-close 60 dtk, `BARRIER_BLOCKED` (>120s), `VEHICLE_STALLED`.
+- ✅ 2.4 Timer pengaman Edge: `BARRIER_BLOCKED`, `VEHICLE_STALLED`, `UNAUTHORIZED_PASSAGE`.
+  Auto-close tak ditambahkan — FSM sudah menutup lewat timeout `no_show` 45 dtk (lebih ketat dari
+  60 dtk). Penyimpangan: `VEHICLE_STALLED` memakai `PatternRedBlink`, sebab peta pin v3 §5.6 tak
+  punya kanal kuning.
 - ✅ 2.5 State machine masuk & keluar + anti-tailgating (v2, teruji).
-- ⬜ 2.6 Logika tutup dipicu sensor (LD rising→falling) pada driver nyata.
+- ✅ 2.6 Logika tutup dipicu sensor (LD rising→falling) pada driver nyata — `tcpctl` tersambung ke
+  `gatesvc` untuk transport `tcp`.
 
 ## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A)
 - ⬜ 3.1 Paket `edge-api` sebagai service Windows/systemd `restart=always` + watchdog.
-- ⬜ 3.2 Resync `STAT` semua controller saat startup/reconnect (rekonstruksi status).
+- ✅ 3.2 Resync `STAT` semua controller saat startup/reconnect (rekonstruksi status) — hanya kanal
+  HIGH yang diumumkan; potret tak menimpa kanal yang sudah diketahui.
 - ⬜ 3.3 Antrian perintah per device (tahan blip koneksi).
 - ⬜ 3.4 Healthcheck internal + endpoint kesehatan per gerbang.
 - 🔧 3.5 Pemulihan < 15 dtk (NFR-2.3) — perlu tes restart di tengah transaksi.

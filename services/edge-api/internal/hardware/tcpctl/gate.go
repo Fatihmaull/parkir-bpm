@@ -195,7 +195,13 @@ func (b *Barrier) Close(ctx context.Context) error {
 // Bila loop bawah belum pernah terbaca stabil (misalnya tepat setelah reconnect),
 // penutupan TIDAK diblokir. Memblokir tanpa dasar akan membuat palang menggantung
 // terbuka setiap kali koneksi pulih, dan palang yang tak pernah menutup adalah
-// kegagalan operasional tersendiri. Rekonstruksi status lewat STAT adalah task 3.2.
+// kegagalan operasional tersendiri.
+//
+// Resync STAT (task 3.2) mempersempit jendela "belum diketahui" itu menjadi satu kali
+// perjalanan perintah setelah koneksi terbentuk, tetapi TIDAK menghapusnya: resync bisa
+// gagal, dan controller yang belum patuh §5.5 tak akan pernah mengisinya. Jadi jangan
+// mengubah cabang ini menjadi "blokir bila tak diketahui" dengan anggapan 3.2 selalu
+// berhasil — anggapan itu tidak dijamin.
 func (b *Barrier) periksaInterlock() error {
 	if high, diketahui := b.under.dev.LoopState(b.under.ch); diketahui && high {
 		return hw.ErrSafetyInterlock

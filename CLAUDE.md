@@ -50,9 +50,10 @@ Baca ini sebelum merencanakan pekerjaan — beberapa hal yang tampak "tinggal di
 - **Tidak ada lapisan basis data di `edge-api`.** Tak ada pgx di `go.mod`; `config.Store` menyebut
   `memory|postgres` tapi hanya `memory` (`internal/memstore`) yang jalan. Ini memblokir Epik 5
   (kecuali 5.5) dan bagian "muat gerbang dari DB" pada task 2.1.
-- **Driver A6/A9 (`tcpctl`) lengkap tetapi belum menggantikan simulator di jalur produksi.**
-  `gatesvc` masih merangkai `sim.Gate` untuk setiap gerbang. Menyambungkan `tcpctl.Gate` ke
-  `gatesvc` untuk `transport: tcp` belum dikerjakan.
+- **Driver A6/A9 (`tcpctl`) sudah tersambung ke jalur produksi** sejak task 2.6 — `gatesvc`
+  merangkai `tcpctl.Gate` untuk gerbang bertransport `tcp`. Yang MASIH tersimulasi: printer di
+  gerbang masuk (task 4.1 terblokir H1). Daftarnya terbuka di `gatesvc.Runner.Disimulasikan()`
+  dan `/api/v1/gates` — jangan mengira seluruh gerbang sudah sungguhan.
 - **Printer tiket belum punya adapter konkret** — terblokir H1 (merek/protokol belum dikonfirmasi
   klien). Gerbang masuk nyata belum bisa lengkap tanpa ini.
 - `go test -race` **tidak bisa jalan di mesin dev Windows** (butuh cgo/gcc). CI Linux adalah
@@ -70,6 +71,13 @@ Ditemukan mahal, jangan dibongkar tanpa alasan kuat:
   berubah HIGH di tengahnya.
 - **Debounce input berbasis stabilitas, bukan tepi pertama.** Palang menutup pada tepi *turun*
   loop bawah; satu pantulan LOW palsu yang lolos bisa menutup palang di atas kendaraan.
+- **Resync STAT hanya mengumumkan kanal HIGH** (`tcpctl.Device.tanamkanStat`, task 3.2). LOW
+  adalah keadaan istirahat: saat lahan sepi keempat kanal LOW, jadi mengumumkannya berarti
+  memancarkan empat tepi *turun* palsu di tiap reconnect — perintah tutup untuk kendaraan yang
+  tak ada. Jangan "melengkapi" resync dengan mengumumkan LOW.
+- **Potret STAT tak pernah menimpa kanal yang sudah diketahui** (`Debouncer.Seed`). Balasan STAT
+  bisa tiba setelah event `INxON/INxOFF` yang lebih baru; menimpanya memundurkan status ke
+  masa lalu.
 - **Setiap gerbang dimiliki satu goroutine** (`gatesvc.Runner`). Jangan menambahkan mutex global
   atau menyentuh state machine dari luar inbox-nya.
 - **Setiap event membawa `gate_code`.** Jangan menambah event tanpa label itu — lahan bisa punya

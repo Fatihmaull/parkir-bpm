@@ -93,6 +93,11 @@ psql "$EDGE_DATABASE_URL" -f db/grants.sql   # append-only audit_logs
 | `chain.verified=false` | rantai audit rusak | jangan hapus data; eskalasi — Cloud simpan hash pembanding |
 | Palang tak menutup | loop bawah HIGH (interlock P4) | benar secara desain; tunggu loop LOW / cek kendaraan |
 | Kertas habis | printer PAPER_OUT | casual berhenti (LOCKED_NO_PAPER); **member tetap bisa masuk** (D3) |
+| Gerbang `UNRESPONSIVE` di health | controller hang: socket hidup tapi `PING` tak dibalas 3× | driver memutus paksa & menyambung ulang sendiri; bila berulang, cek daya/firmware controller |
+| Gerbang `DISCONNECTED` menetap | kabel LAN / IP-port salah / controller mati | cek `gates.endpoint`; driver terus mencoba dengan backoff (maks 15 dtk), tak perlu restart edge-api |
+| Perintah palang ditolak `controller sedang terputus` | benar secara desain | perintah **tidak** diantre — kirim ulang setelah gerbang ONLINE (mencegah palang menutup terlambat di atas kendaraan) |
+| Loop "berkedip" tapi state machine diam | pantulan kontak < 150 ms | benar secara desain (debounce §6.1); bila kendaraan nyata tak terdeteksi, kalibrasi loop detector di sisi lapangan |
+| edge-api gagal start, log "konfigurasi gerbang tidak sah" | `code` gerbang kembar / transport tcp tanpa endpoint | perbaiki daftar gerbang; startup sengaja digagalkan agar tak muncul gerbang berperilaku ganjil |
 
 ---
 
@@ -103,8 +108,21 @@ interlock, fare engine, audit chain, pembayaran (tunai/EDC-sim/member; QRIS+webh
 outbox+sync (terbukti e2e), CRON, LPR degradasi+ocr_logs, auth+RBAC, isolasi multi-tenant,
 12 halaman dashboard, bulk CSV.
 
+**Ditambahkan v3 (Epik 1 & sebagian Epik 2):** driver controller **A6/A9-TCP** lengkap
+(`internal/hardware/tcpctl`) — framing, auto-reconnect backoff+jitter, keepalive PING/PINGOK dengan
+deteksi controller bisu, korelasi perintah↔respons + retry, debounce input ≥150 ms, parser Wiegand,
+interface Layer-2, peta pin per gerbang, ring buffer telemetry, dan **simulator controller TCP**
+(`tcpctl/simdev`) untuk uji integrasi CI. Interlock P4 kini ditegakkan di jalur driver nyata, bukan
+hanya simulator. `gatesvc` mengelola **N gerbang** dengan satu goroutine pemilik per gerbang, dan
+semua event berlabel `gate_code`.
+
+> **Catatan penting:** driver A6/A9 sudah lengkap tetapi **belum tersambung ke jalur produksi** —
+> `gatesvc` masih merangkai simulator untuk setiap gerbang. Menyambungkan `tcpctl.Gate` untuk
+> gerbang bertransport `tcp` belum dikerjakan.
+
 **Tertahan blocker (bukan pekerjaan logika):**
-- Repository **pgx** + validasi migrasi → butuh Docker/PostgreSQL berjalan.
+- Repository **pgx** + validasi migrasi → butuh Docker/PostgreSQL berjalan. Selama ini belum ada,
+  `edge-api` berjalan sepenuhnya in-memory dan daftar gerbang dibaca dari `.env`, bukan tabel `gates`.
 - **LPR** transport gRPC nyata + model YOLOv8/EasyOCR → Fase 2 (protoc + model).
 - **EDC/JTMO fisik**, **firmware controller**, **kamera** → pihak ketiga (§1.3, Fase 1b).
 - **PG nyata (Midtrans/Xendit)**, **DigitalOcean**, **Cloudflare Tunnel** → sumber daya klien.

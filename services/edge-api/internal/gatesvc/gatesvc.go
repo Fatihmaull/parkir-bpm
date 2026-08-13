@@ -71,6 +71,10 @@ type Config struct {
 
 	// Source memuat daftar gerbang. nil → DefaultSpecs (satu masuk, satu keluar, simulator).
 	Source GateSource
+
+	// Ambang pengaman Edge (task 2.4). Nilai 0 memakai bawaan.
+	BlockedAfter time.Duration // LD2/LD4 HIGH terlalu lama → BARRIER_BLOCKED
+	StalledAfter time.Duration // LD1/LD3 HIGH terlalu lama → VEHICLE_STALLED
 }
 
 // Service menjalankan N gerbang di atas perangkat + memstore + hub.
@@ -146,6 +150,7 @@ func (s *Service) buatRunner(spec GateSpec, cfg Config) *Runner {
 		dev:   sim.NewGate(),
 		inbox: make(chan tugas, inboxDepth),
 	}
+	r.wd = newWatchdog(r, cfg.BlockedAfter, cfg.StalledAfter)
 
 	// Timer keselamatan memancarkan event lewat inbox yang sama, jadi ia tetap tunduk
 	// pada goroutine pemilik dan tak pernah menyentuh state machine langsung.
@@ -239,6 +244,11 @@ type Runner struct {
 	entry *gate.Controller     // terisi bila ENTRY
 	exit  *gate.ExitController // terisi bila EXIT
 
+	// Pelacakan loop & pengaman — hanya disentuh goroutine pemilik.
+	wd            *watchdog
+	loopPreHigh   bool
+	loopUnderHigh bool
+
 	timer gtimer
 	inbox chan tugas
 }
@@ -272,6 +282,7 @@ func (r *Runner) milik() {
 			close(t.balas)
 		case <-r.svc.stop:
 			r.timer.cancel()
+			r.wd.stop()
 			return
 		}
 	}
@@ -308,7 +319,10 @@ func (r *Runner) FireEntry(e gate.Event) error {
 	if r.entry == nil {
 		return ErrJenisGerbang
 	}
-	return r.lakukan(func() { _ = r.entry.Handle(context.Background(), e) })
+	return r.lakukan(func() {
+		_ = r.entry.Handle(context.Background(), e)
+		r.wd.amati(r.perbaruiKondisiMasuk(e))
+	})
 }
 
 // FireExit menyerahkan satu event gerbang keluar.
@@ -316,7 +330,10 @@ func (r *Runner) FireExit(e gate.XEvent) error {
 	if r.exit == nil {
 		return ErrJenisGerbang
 	}
-	return r.lakukan(func() { _ = r.exit.Handle(context.Background(), e) })
+	return r.lakukan(func() {
+		_ = r.exit.Handle(context.Background(), e)
+		r.wd.amati(r.perbaruiKondisiKeluar(e))
+	})
 }
 
 // State mengembalikan state gerbang dalam bentuk teks.

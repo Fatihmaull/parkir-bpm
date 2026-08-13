@@ -26,6 +26,11 @@ func registerGateRoutes(app *fiber.App, svc *gatesvc.Service) {
 			}
 			if r, ok := svc.Gate(s.Code); ok {
 				m["state"] = r.State()
+				m["nyata"] = r.Nyata()
+				m["device_status"] = r.StatusPerangkat()
+				// Perangkat yang masih palsu di gerbang nyata WAJIB terlihat — jangan
+				// biarkan operator mengira seluruh gerbang sudah sungguhan.
+				m["disimulasikan"] = r.Disimulasikan()
 			}
 			out = append(out, m)
 		}

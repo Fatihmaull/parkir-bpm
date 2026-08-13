@@ -136,18 +136,27 @@ func New(cfg Config, hub *wsbus.Hub, store *memstore.Store) (*Service, error) {
 	}
 
 	for _, spec := range specs {
-		s.gates[spec.Code] = s.buatRunner(spec, cfg)
+		r, err := s.buatRunner(spec, cfg)
+		if err != nil {
+			s.tutupPerangkat() // jangan tinggalkan koneksi menggantung
+			return nil, err
+		}
+		s.gates[spec.Code] = r
 		s.order = append(s.order, spec.Code)
 	}
 	return s, nil
 }
 
 // buatRunner merangkai satu gerbang beserta controller-nya.
-func (s *Service) buatRunner(spec GateSpec, cfg Config) *Runner {
+func (s *Service) buatRunner(spec GateSpec, cfg Config) (*Runner, error) {
+	dev, err := buatPerangkat(spec, cfg)
+	if err != nil {
+		return nil, err
+	}
 	r := &Runner{
 		spec:  spec,
 		svc:   s,
-		dev:   sim.NewGate(),
+		dev:   dev,
 		inbox: make(chan tugas, inboxDepth),
 	}
 	r.wd = newWatchdog(r, cfg.BlockedAfter, cfg.StalledAfter)
@@ -176,7 +185,7 @@ func (s *Service) buatRunner(spec GateSpec, cfg Config) *Runner {
 			ArmTimeout: r.timer.arm, CancelTimer: r.timer.cancel, Emit: r.emit,
 		})
 	}
-	return r
+	return r, nil
 }
 
 // Start menjalankan goroutine pemilik tiap gerbang beserta penerus event perangkatnya.
@@ -193,6 +202,14 @@ func (s *Service) Start() {
 func (s *Service) Close() {
 	s.tutupSekali.Do(func() { close(s.stop) })
 	s.wg.Wait()
+	s.tutupPerangkat()
+}
+
+// tutupPerangkat memutus seluruh controller nyata.
+func (s *Service) tutupPerangkat() {
+	for _, r := range s.gates {
+		r.dev.tutup()
+	}
 }
 
 // Specs mengembalikan daftar gerbang sesuai urutan sumbernya.
@@ -240,7 +257,7 @@ type Runner struct {
 	spec GateSpec
 	svc  *Service
 
-	dev   *sim.Gate
+	dev   *perangkat
 	entry *gate.Controller     // terisi bila ENTRY
 	exit  *gate.ExitController // terisi bila EXIT
 
@@ -257,7 +274,20 @@ type Runner struct {
 func (r *Runner) Spec() GateSpec { return r.spec }
 
 // Sim memberi akses ke perangkat tersimulasi gerbang ini (Field Monitor & uji).
-func (r *Runner) Sim() *sim.Gate { return r.dev }
+// Sim mengembalikan perangkat tersimulasi gerbang ini, atau nil bila gerbangnya nyata.
+func (r *Runner) Sim() *sim.Gate { return r.dev.simGate }
+
+// Nyata melaporkan apakah gerbang memakai controller fisik.
+func (r *Runner) Nyata() bool { return r.dev.Nyata() }
+
+// StatusPerangkat melaporkan kondisi koneksi controller; kosong untuk gerbang tersimulasi.
+func (r *Runner) StatusPerangkat() string { return r.dev.Status() }
+
+// Disimulasikan mendaftar perangkat yang MASIH palsu meski gerbangnya nyata. Daftar ini
+// sengaja dibuka ke API & log agar tak pernah tersamar sebagai perangkat sungguhan.
+func (r *Runner) Disimulasikan() []string {
+	return append([]string(nil), r.dev.disimulasikan...)
+}
 
 // emit memancarkan event yang SELALU berlabel gate_code (task 2.2).
 //
@@ -371,9 +401,14 @@ func (r *Runner) Amount() (int64, error) {
 
 // DriveLoop menggerakkan loop "pre" (LD1/LD3) atau "post" (LD2/LD4).
 func (r *Runner) DriveLoop(which string, high bool) error {
-	loop := r.dev.LoopPre
+	// Pada gerbang nyata, loop digerakkan kendaraan — bukan HTTP. Menyuntik di sini akan
+	// membuat state machine percaya sesuatu yang tak terjadi di lapangan.
+	if r.dev.simGate == nil {
+		return ErrBukanSimulator
+	}
+	loop := r.dev.simGate.LoopPre
 	if which == "post" {
-		loop = r.dev.LoopPost
+		loop = r.dev.simGate.LoopPost
 	}
 	if !loop.Set(high) {
 		return nil // tak ada perubahan

@@ -339,6 +339,49 @@ Perintah yang hilang diam-diam adalah cara kita kehilangan waktu berhari-hari na
 
 ---
 
+## 7b. Menjalankan Edge sebagai service — task 3.1 (K32–K34)
+
+### K32 — Kegagalan fatal WAJIB mematikan proses ⚠️
+`Restart=always` — di systemd maupun NSSM — hanya menangkap proses yang **mati**. Proses yang tetap
+hidup setelah kegagalan fatal terbaca "active (running)" selamanya, tidak pernah dinyalakan ulang,
+dan gerbang berhenti melayani tanpa satu pun alarm berbunyi.
+
+Karena itu `main` memakai pola `run() error` dan keluar dengan status bukan-nol untuk setiap
+kegagalan fatal, dan port HTTP diikat **sebelum** melayani sehingga bind yang gagal menjadi
+kegagalan startup yang jujur, bukan error di dalam goroutine.
+
+**Ini memperbaiki bug nyata, bukan pengerasan spekulatif.** Sebelumnya `app.Listen` dipanggil di
+dalam goroutine dan errornya hanya dicatat; diukur dengan port yang sudah dipakai, biner lama
+**tidak pernah mati** — hidup terus tanpa HTTP sama sekali.
+*Sumber: `cmd/edge-api/main.go`.*
+
+### K33 — Watchdog membuktikan hidupnya MESIN INTERNAL, bukan sehatnya gerbang ⚠️
+Ini penerapan langsung K26 pada lapisan proses. Gerbang yang controller-nya tercabut memang harus
+terbaca `down`, tetapi watchdog tak boleh membunuh edge-api karenanya: restart tak menyambungkan
+kabel, dan ia **menjatuhkan gerbang lain yang masih melayani** (P8).
+
+Yang dijadikan bukti hidup adalah **gelang healthcheck internal yang masih menyapu tepat waktu**
+(`gatesvc.MesinInternalHidup`), dengan ambang 4× interval — satu sapuan terlewat karena GC bukan
+kebekuan, dan watchdog yang gugup lebih merusak daripada tak ada. Service yang belum `Start`
+dinyatakan hidup, supaya watchdog tak membunuh proses tepat saat ia sedang bangun.
+*Sumber: `gatesvc/health.go`, `cmd/edge-api/main.go:jalankanWatchdog`.*
+
+### K34 — Windows memakai NSSM + watchdog eksternal, bukan kode `svc` native
+Integrasi `golang.org/x/sys/windows/svc` akan menaruh kode khusus Windows di jalur startup yang
+**tidak dapat kita uji sama sekali** — tak ada Windows di CI maupun di lingkungan pengembangan ini.
+Kode yang hanya lolos kompilasi, di jalur startup Edge, bukan pertukaran yang baik.
+
+NSSM menangani restart, direktori kerja, dan rotasi log tanpa menuntut apa pun dari biner kita
+selain daur hidup yang benar (K32) — yang justru dapat diuji penuh di Linux.
+
+**Harga yang dibayar dan ditutup:** NSSM tak punya padanan `WatchdogSec`, jadi proses yang membeku
+tak tertangkap. Celah itu ditutup `deploy/windows/watchdog-edge-api.ps1` sebagai Scheduled Task yang
+menguji endpoint kesehatan dari luar — dan konsisten dengan K33, ia menguji **apakah proses
+menjawab**, bukan apa isi jawabannya.
+*Sumber: `deploy/windows/`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -383,4 +426,5 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 | Tanggal | Perubahan |
 |---|---|
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
+| 2026-08-13 | K32–K34 ditambahkan (task 3.1 — service + watchdog). |
 | 2026-08-13 | K27–K31 terimplementasi. K31 dikoreksi: ambang 2 dtk milik model antrian; model rekonsiliasi yang dipakai menuntut ambang yang berbeda (45 dtk, disamakan dengan `no_show`). |

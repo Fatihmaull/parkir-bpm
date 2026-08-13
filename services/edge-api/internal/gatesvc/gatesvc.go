@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
@@ -94,6 +95,10 @@ type Service struct {
 	// Irama healthcheck internal (task 3.4).
 	healthInterval time.Duration
 	healthTimeout  time.Duration
+
+	// sapuanTerakhir — waktu selesainya sapuan healthcheck terakhir (unix nano),
+	// bukti hidupnya mesin internal bagi watchdog service (task 3.1).
+	sapuanTerakhir atomic.Int64
 
 	stop        chan struct{}
 	tutupSekali sync.Once

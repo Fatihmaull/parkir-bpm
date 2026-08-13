@@ -277,3 +277,80 @@ func TestHealthcheckMengumumkanPerubahanSaja(t *testing.T) {
 		}
 	}
 }
+
+// Watchdog service (task 3.1) bertanya "apakah mesin internal masih berjalan", bukan
+// "apakah gerbangnya sehat". Bedanya menentukan apakah proses dibunuh atau tidak.
+func TestMesinInternalHidup(t *testing.T) {
+	hub := wsbus.NewHub()
+	store := memstore.New("node-test", time.Now)
+	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
+
+	svc, err := New(Config{
+		NodeID: "node-test", TenantID: "t1", SiteID: "s1",
+		Site:               gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000},
+		Source:             duaMasukSatuKeluar(),
+		HealthInterval:     20 * time.Millisecond,
+		HealthProbeTimeout: 200 * time.Millisecond,
+	}, hub, store)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Sebelum Start belum ada sapuan sama sekali. Menyatakannya mati akan membuat
+	// watchdog membunuh proses tepat saat ia sedang bangun.
+	if !svc.MesinInternalHidup() {
+		t.Fatal("Service yang belum Start tak boleh dinyatakan beku")
+	}
+	if !svc.LastHealthSweep().IsZero() {
+		t.Fatal("LastHealthSweep harus nol sebelum Start")
+	}
+
+	svc.Start()
+	tungguSapuan(t, svc)
+
+	if !svc.MesinInternalHidup() {
+		t.Fatalf("mesin internal dinyatakan beku padahal menyapu: %v", svc.LastHealthSweep())
+	}
+
+	// Gelang berhenti (di lapangan: goroutine-nya membeku) → watchdog harus menahan ping.
+	svc.Close()
+	batas := time.Now().Add(2 * time.Second)
+	for time.Now().Before(batas) {
+		if !svc.MesinInternalHidup() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("gelang berhenti menyapu tapi mesin masih dinyatakan hidup (sapuan terakhir %v)",
+		svc.LastHealthSweep())
+}
+
+// Gerbang yang mati TIDAK boleh membuat mesin internal dinyatakan beku — restart tak
+// menyambungkan kabel, dan ia menjatuhkan gerbang lain yang masih melayani (P8, K26).
+func TestGerbangMatiTakMembekukanMesinInternal(t *testing.T) {
+	src := StaticSource{
+		{Code: "GATE-IN-01", Kind: KindEntry, Transport: TransportTCP, Endpoint: "127.0.0.1:1"},
+		{Code: "GATE-OUT-01", Kind: KindExit, Transport: TransportSim},
+	}
+	svc, _ := svcKesehatan(t, src, 20*time.Millisecond, 200*time.Millisecond)
+	tungguSapuan(t, svc)
+
+	if kes := svc.Health(time.Second); kes.Status != HealthDown {
+		t.Fatalf("prasyarat gugur: rollup = %q, want %q", kes.Status, HealthDown)
+	}
+	if !svc.MesinInternalHidup() {
+		t.Fatal("gerbang mati membekukan penilaian mesin internal — proses akan direstart sia-sia")
+	}
+}
+
+func tungguSapuan(t *testing.T, svc *Service) {
+	t.Helper()
+	batas := time.Now().Add(3 * time.Second)
+	for time.Now().Before(batas) {
+		if !svc.LastHealthSweep().IsZero() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("timeout menunggu sapuan healthcheck pertama")
+}

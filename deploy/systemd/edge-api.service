@@ -1,0 +1,86 @@
+; Unit systemd untuk edge-api (task 3.1, PRD v3 §12).
+;
+; Edge adalah titik kritis lahan: "boleh mati? tidak — gerbang berhenti" (PRD §4.2).
+; Unit ini menjaga dua hal yang berbeda:
+;   1. proses yang MATI dinyalakan ulang           → Restart=always
+;   2. proses yang HIDUP TAPI MEMBEKU dibunuh dulu → WatchdogSec + Type=notify
+; Tanpa yang kedua, edge-api yang deadlock terbaca "active (running)" selamanya dan
+; gerbang berhenti melayani tanpa satu pun alarm berbunyi.
+;
+; Pasang:
+;   sudo cp deploy/systemd/edge-api.service /etc/systemd/system/
+;   sudo cp deploy/systemd/edge-api.env     /etc/parkir/edge-api.env   # lalu SUNTING
+;   sudo chmod 600 /etc/parkir/edge-api.env
+;   sudo systemctl daemon-reload && sudo systemctl enable --now edge-api
+
+[Unit]
+Description=parkir edge-api — Edge Node lahan (gerbang, fare, audit)
+Documentation=https://github.com/Fatihmaull/parkir-bpm/blob/main/docs/RUNBOOK.md
+
+; Jaringan lokal harus siap sebelum driver A6/A9 mencoba menyambung ke controller.
+; Ini bukan syarat keras — driver punya reconnect+backoff sendiri (P8) — hanya
+; menghindari deretan dial gagal di detik-detik pertama boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+; NotifyAccess=main: hanya proses utama yang boleh berbicara ke systemd, bukan anak
+; proses mana pun yang kebetulan mewarisi NOTIFY_SOCKET.
+NotifyAccess=main
+
+ExecStart=/usr/local/bin/edge-api
+WorkingDirectory=/var/lib/parkir
+EnvironmentFile=/etc/parkir/edge-api.env
+
+; ── Restart ──
+Restart=always
+; 2 dtk, bukan 0: crash-loop yang berputar secepat mungkin membanjiri log dan menyulitkan
+; diagnosis, sementara NFR-2.3 (pulih < 15 dtk) masih longgar terhadap jeda sekecil ini.
+RestartSec=2s
+; Jangan pernah menyerah menyalakan ulang. Bawaan systemd (5 kali per 10 dtk lalu unit
+; masuk keadaan failed) berarti lahan berhenti melayani permanen setelah lima kegagalan
+; beruntun — persis yang dilarang P8.
+StartLimitIntervalSec=0
+
+; ── Watchdog ──
+; edge-api mengirim WATCHDOG=1 tiap setengah nilai ini (lihat internal/svcnotify).
+; 30 dtk memberi ruang bagi GC dan mesin lahan yang sibuk; di bawah itu watchdog mulai
+; membunuh proses yang sebenarnya sehat, dan watchdog yang gugup lebih merusak daripada
+; tak ada sama sekali.
+WatchdogSec=30s
+; Proses yang gagal membuktikan diri dibunuh lalu dinyalakan ulang, bukan dibiarkan.
+WatchdogSignal=SIGABRT
+
+; ── Shutdown ──
+; edge-api menutup HTTP dengan tenggat 5 dtk lalu menutup gerbang & controller.
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+
+; ── Pengerasan ──
+; Edge Node berada di lapangan dan lebih rentan secara fisik (D7), jadi permukaan
+; serangnya dipersempit sebisa mungkin tanpa menghalangi kerjanya.
+User=parkir
+Group=parkir
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/parkir /var/log/parkir
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+; Driver controller memakai TCP biasa; tak ada kebutuhan soket mentah.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+; Log terstruktur JSON ke journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edge-api
+
+[Install]
+WantedBy=multi-user.target

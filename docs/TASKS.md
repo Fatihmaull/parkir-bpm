@@ -49,7 +49,10 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
   `gatesvc` untuk transport `tcp`.
 
 ## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A)
-- ⬜ 3.1 Paket `edge-api` sebagai service Windows/systemd `restart=always` + watchdog.
+- ✅ 3.1 `edge-api` sebagai service systemd/Windows + watchdog — unit `Type=notify` dengan
+  `WatchdogSec` (`deploy/systemd/`), NSSM + Scheduled Task untuk Windows (`deploy/windows/`),
+  sd_notify di `internal/svcnotify`. Kegagalan fatal kini mematikan proses (dulu menggantung
+  hidup tanpa HTTP). Watchdog membuktikan mesin internal, BUKAN kesehatan gerbang (K33).
 - ✅ 3.2 Resync `STAT` semua controller saat startup/reconnect (rekonstruksi status) — hanya kanal
   HIGH yang diumumkan; potret tak menimpa kanal yang sudah diketahui.
 - ✅ 3.3 Tahan blip koneksi per device — **rekonsiliasi keadaan, bukan antrian perintah**. Perintah

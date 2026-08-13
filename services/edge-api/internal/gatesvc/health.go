@@ -208,6 +208,37 @@ func (s *Service) Health(timeout time.Duration) ServiceHealth {
 	return out
 }
 
+// LastHealthSweep melaporkan kapan sapuan healthcheck internal terakhir selesai.
+//
+// Dipakai watchdog service (task 3.1) sebagai bukti mesin internal masih berjalan.
+func (s *Service) LastHealthSweep() time.Time {
+	ns := s.sapuanTerakhir.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// MesinInternalHidup melaporkan apakah gelang healthcheck masih menyapu tepat waktu.
+//
+// Ini SENGAJA tidak melihat sehat-tidaknya gerbang. Gerbang yang controller-nya tercabut
+// harus terbaca "down" di endpoint kesehatan, TETAPI tak boleh membuat watchdog membunuh
+// edge-api — restart tak menyambungkan kabel, dan ia menjatuhkan gerbang lain yang masih
+// sehat (P8). Yang dijawab di sini hanya satu hal: apakah proses ini masih menjalankan
+// mesinnya sendiri, atau sudah membeku.
+//
+// Ambangnya kelipatan interval, bukan satu interval: satu sapuan yang terlewat karena GC
+// atau mesin sibuk bukan kebekuan, dan watchdog yang gugup lebih merusak daripada tak ada.
+func (s *Service) MesinInternalHidup() bool {
+	t := s.LastHealthSweep()
+	if t.IsZero() {
+		// Belum ada sapuan sama sekali — Service belum di-Start, atau baru saja.
+		// Menyatakannya mati akan membunuh proses tepat saat ia sedang bangun.
+		return true
+	}
+	return time.Since(t) <= 4*s.healthInterval
+}
+
 // jalankanHealthcheck menyampel kesehatan tiap gerbang dan mengumumkan PERUBAHANnya.
 //
 // Yang diumumkan hanya perubahan: lahan sepi akan menghasilkan sampel identik setiap
@@ -220,6 +251,7 @@ func (s *Service) jalankanHealthcheck(interval, timeout time.Duration) {
 	defer tick.Stop()
 
 	sebelumnya := make(map[string]string, len(s.order))
+	s.sapuanTerakhir.Store(time.Now().UnixNano())
 
 	for {
 		select {
@@ -249,6 +281,9 @@ func (s *Service) jalankanHealthcheck(interval, timeout time.Duration) {
 					"controller": h.Controller, "alasan": h.Alasan,
 				})
 			}
+			// Ditandai SETELAH seluruh gerbang disapu: yang dibuktikan adalah sapuan
+			// yang tuntas, bukan gelang yang sekadar berdetak.
+			s.sapuanTerakhir.Store(time.Now().UnixNano())
 		}
 	}
 }

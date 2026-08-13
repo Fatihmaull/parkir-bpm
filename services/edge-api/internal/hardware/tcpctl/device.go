@@ -71,6 +71,9 @@ type DeviceStats struct {
 	StatResyncs        uint64 // resync STAT yang berhasil dibaca & di-parse (3.2)
 	StatResyncFailures uint64 // resync STAT yang gagal atau balasannya tak terbaca
 	StatSeeded         uint64 // kanal input yang nilainya berasal dari potret STAT
+
+	Reconciles       uint64 // keadaan yang berhasil ditegaskan ulang setelah reconnect (3.3)
+	ReconcileSkipped uint64 // penegasan ulang yang SENGAJA dilewati — niat basi atau bukti kurang
 }
 
 // Device adalah koneksi yang menyembuhkan diri sendiri ke satu controller gerbang
@@ -143,6 +146,9 @@ type Device struct {
 	stats         DeviceStats
 	lastStat      StatSnapshot
 	punyaLastStat bool
+
+	// reconciler ditegaskan ulang tiap koneksi pulih, setelah resync (task 3.3).
+	reconciler func(context.Context)
 }
 
 // DeviceOption menyetel perilaku Device.
@@ -471,13 +477,18 @@ func (d *Device) supervise(ctx context.Context) {
 
 		// Rekonstruksi status harus berjalan BERSAMAAN dengan salurkan, bukan
 		// mendahuluinya — lihat resyncStat untuk alasannya.
-		if d.statResync {
-			kw.Add(1)
-			go func() {
-				defer kw.Done()
+		//
+		// Rekonsiliasi (task 3.3) menyusul di goroutine yang SAMA supaya urutannya
+		// terjamin: penegasan ulang perintah tutup menuntut bukti loop bawah LOW, dan
+		// bukti itu baru ada setelah resync menanamkan potret STAT.
+		kw.Add(1)
+		go func() {
+			defer kw.Done()
+			if d.statResync {
 				d.resyncStat(ctxKoneksi)
-			}()
-		}
+			}
+			d.rekonsiliasi(ctxKoneksi)
+		}()
 
 		d.salurkan(ctxKoneksi, c)
 

@@ -271,8 +271,7 @@ sehat** (P8). Sebaliknya, `GET /api/v1/gates/:code/health` selalu 200 selama ger
 
 ## 7. Antrian perintah per device — task 3.3 (K27–K31)
 
-> **Status: diputuskan, implementasi berjalan.** Dicatat di sini sebelum kodenya selesai karena
-> aturannya menyentuh P4 dan tak boleh disimpulkan dari kode saja.
+> **Status: terimplementasi** — `tcpctl/rekonsiliasi.go`, commit task 3.3.
 
 Nama task-nya "antrian perintah", tapi setelah permukaan perintahnya dipetakan, masalahnya bukan
 *kapan* mengirim ulang — melainkan *apa* yang dikirim ulang.
@@ -314,11 +313,29 @@ kegagalan itu tidak simetris, dan kita memilih yang bisa diganti uang.
 Alternatifnya (menutup buta dengan alert keras) melanggar P4 secara sadar dan **harus** keputusan
 manusia yang tercatat, bukan default. Ditawarkan ke Fatih 2026-08-13 → dijawab "lanjut apa adanya".
 
-### K31 — TTL 2 detik, kalau tetap ada antrian
-Bukan angka karangan: `DefaultBackoffMin` 500 ms dengan equal jitter menaruh percobaan dial pertama
-di 250–500 ms dan kedua di ~1–1,5 s. Jadi 2 detik menutup persis "blip" (dua percobaan pertama) dan
-**tidak** menutup pemadaman. Setiap perintah yang dibuang wajib tercatat di `DeviceStats` +
-telemetry — perintah yang hilang diam-diam adalah cara kita kehilangan waktu berhari-hari nanti.
+### K31 — Kedaluwarsa berlaku pada niat **buka**, bukan pada antrian; ambangnya 45 detik
+
+**Koreksi terhadap rancangan awal.** Saat aturan ini pertama dirumuskan, angkanya 2 detik —
+diturunkan dari `DefaultBackoffMin` 500 ms + equal jitter, yang menaruh dua percobaan dial pertama
+di dalam ~1,5 detik. Itu benar **untuk model antrian perintah**: di sana yang kedaluwarsa adalah
+perintah yang menunggu terkirim, dan batasnya memang harus sesempit "blip".
+
+Model yang akhirnya dipakai bukan antrian melainkan rekonsiliasi (K27), dan di sana yang disimpan
+bukan perintah melainkan **niat yang terus diperbarui lapisan atas**. Niat tak pernah "menunggu
+terkirim" — ia selalu mewakili kehendak terkini FSM. Memberinya batas 2 detik akan menolak
+penegasan ulang yang justru benar: reconnect 5 detik ke dalam satu siklus buka masih menghadapi
+kendaraan yang sama, yang masih menunggu palang.
+
+Yang sesungguhnya perlu dijaga adalah **FSM yang macet**: niat buka yang tak pernah diperbarui
+karena tak ada lagi yang memperbaruinya. Ambangnya karena itu disamakan dengan timeout `no_show`
+(45 dtk) — di atas itu FSM yang sehat sudah membatalkan sesinya sendiri, jadi niat yang lebih tua
+hanya mungkin berasal dari FSM yang tak lagi berjalan. Lihat `DefaultMaxOpenIntentAge`.
+
+Niat **tutup** tak punya kedaluwarsa: ia dijaga syarat yang lebih kuat (K30), dan "tertutup" adalah
+keadaan istirahat yang tak menjadi salah karena waktu berlalu.
+
+Setiap penegasan yang dilewati wajib tercatat — `DeviceStats.ReconcileSkipped` + telemetry.
+Perintah yang hilang diam-diam adalah cara kita kehilangan waktu berhari-hari nanti.
 
 ---
 
@@ -366,3 +383,4 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 | Tanggal | Perubahan |
 |---|---|
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
+| 2026-08-13 | K27–K31 terimplementasi. K31 dikoreksi: ambang 2 dtk milik model antrian; model rekonsiliasi yang dipakai menuntut ambang yang berbeda (45 dtk, disamakan dengan `no_show`). |

@@ -69,7 +69,12 @@ Ditemukan mahal, jangan dibongkar tanpa alasan kuat:
 
 - **Perintah ke controller tak pernah diantre saat terputus** (`tcpctl.ErrNotConnected`).
   `OUT1OFF` yang tertahan lalu terkirim beberapa detik kemudian bisa menutup palang di atas
-  kendaraan lain. Antrian sadar-konteks adalah task 3.3, bukan ditambahkan diam-diam.
+  kendaraan lain. Ini tetap berlaku setelah task 3.3: yang ditambahkan bukan antrian perintah
+  melainkan **rekonsiliasi niat** (`tcpctl/rekonsiliasi.go`) — keadaan yang dikehendaki ditegaskan
+  ulang setelah koneksi pulih, dengan syarat keselamatan diperiksa pada detik penegasan itu.
+- **Rekonsiliasi tutup menuntut bukti positif loop bawah LOW**, lebih ketat daripada
+  `periksaInterlock` di jalur hidup. Jalur hidup boleh menutup saat status tak diketahui karena ia
+  baru saja melihat LD2 turun; rekonsiliator tak melihat apa pun. Jangan "menyeragamkan" keduanya.
 - **Interlock diperiksa ulang di setiap percobaan retry**, bukan sekali di awal
   (`tcpctl.WithCommandGuard`). Satu `Exec` merentang ratusan milidetik dan loop bawah bisa
   berubah HIGH di tengahnya.

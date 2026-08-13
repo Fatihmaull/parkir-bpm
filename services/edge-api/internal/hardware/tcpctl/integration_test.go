@@ -335,7 +335,7 @@ func TestIntegrasiSimdevStatMencerminkanKeadaan(t *testing.T) {
 
 // siapkanResync membangun gerbang seperti siapkan, tetapi opsi Device-nya dapat
 // diubah — uji resync perlu mematikan keepalive atau resync itu sendiri.
-func siapkanResync(t *testing.T, siapSim func(*simdev.Device), extra ...tcpctl.DeviceOption) (*tcpctl.Gate, *tcpctl.Device, *simdev.Device) {
+func siapkanResync(t *testing.T, siapSim func(*simdev.Device), extra ...tcpctl.DeviceOption) (*tcpctl.Gate, *tcpctl.Device, *simdev.Device, <-chan hw.LoopEvent) {
 	t.Helper()
 
 	sim, err := simdev.New("", simdev.WithPulse(50*time.Millisecond))
@@ -359,6 +359,22 @@ func siapkanResync(t *testing.T, siapSim func(*simdev.Device), extra ...tcpctl.D
 	}, extra...)
 
 	dev := tcpctl.NewDevice(sim.Addr(), opts...)
+
+	// Gerbang dirangkai dan langganan dibuka SEBELUM dev.Start, bukan sesudahnya.
+	//
+	// Resync startup memancarkan tepi seed-nya sesaat setelah koneksi pertama terbentuk.
+	// Berlangganan setelah itu berarti balapan dengan salurkanLoop: kalau ia sempat
+	// mengambil event dari loopEvents selagi daftar subscriber masih kosong, event itu
+	// hilang untuk selamanya dan uji gagal tanpa ada yang rusak. Merangkai lebih dulu
+	// menutup jendela itu sepenuhnya — belum ada koneksi, jadi belum ada yang bisa
+	// terlewat.
+	g, err := tcpctl.NewGate(dev, tcpctl.DefaultGateConfig(tcpctl.GateEntry))
+	if err != nil {
+		t.Fatalf("NewGate: %v", err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	post := g.LoopPost.Subscribe()
+
 	ctx, batal := context.WithCancel(context.Background())
 	t.Cleanup(batal)
 	dev.Start(ctx)
@@ -366,23 +382,15 @@ func siapkanResync(t *testing.T, siapSim func(*simdev.Device), extra ...tcpctl.D
 
 	tungguSampai(t, func() bool { return dev.Status() == tcpctl.StatusOnline }, "driver ONLINE")
 
-	g, err := tcpctl.NewGate(dev, tcpctl.DefaultGateConfig(tcpctl.GateEntry))
-	if err != nil {
-		t.Fatalf("NewGate: %v", err)
-	}
-	t.Cleanup(func() { _ = g.Close() })
-
-	return g, dev, sim
+	return g, dev, sim, post
 }
 
 // Inti task 3.2: kendaraan yang sudah berdiri di atas loop sejak SEBELUM koneksi putus
 // tidak menghasilkan tepi baru saat koneksi pulih. Tanpa resync ia tak terlihat sampai
 // kendaraan itu pergi — dan tepi turunnya justru memerintahkan palang menutup.
 func TestIntegrasiResyncMenemukanLoopYangSudahHIGH(t *testing.T) {
-	g, dev, sim := siapkanResync(t, nil)
+	g, dev, sim, post := siapkanResync(t, nil)
 	cfg := g.Config()
-
-	post := g.LoopPost.Subscribe()
 
 	// Kendaraan tiba selagi koneksi masih sehat.
 	if err := sim.SetInput(cfg.Pins.LoopUnder, true); err != nil {
@@ -410,7 +418,7 @@ func TestIntegrasiResyncMenemukanLoopYangSudahHIGH(t *testing.T) {
 func TestIntegrasiResyncSaatStartup(t *testing.T) {
 	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
 
-	g, dev, _ := siapkanResync(t, func(s *simdev.Device) {
+	_, dev, _, post := siapkanResync(t, func(s *simdev.Device) {
 		// Kendaraan sudah ada sebelum driver menyambung sama sekali.
 		if err := s.SetInput(cfg.Pins.LoopUnder, true); err != nil {
 			t.Fatalf("SetInput: %v", err)
@@ -418,7 +426,7 @@ func TestIntegrasiResyncSaatStartup(t *testing.T) {
 	})
 
 	tungguSampai(t, func() bool { return dev.Stats().StatResyncs >= 1 }, "resync STAT dijalankan saat startup")
-	tungguEvent(t, g.LoopPost.Subscribe(), true)
+	tungguEvent(t, post, true)
 
 	if high, diketahui := dev.LoopState(cfg.Pins.LoopUnder); !diketahui || !high {
 		t.Fatalf("LoopState = (%v,%v), want (true,true)", high, diketahui)
@@ -429,9 +437,8 @@ func TestIntegrasiResyncSaatStartup(t *testing.T) {
 // mengumumkannya berarti memancarkan tepi TURUN palsu pada tiap reconnect — tepi yang
 // dipakai state machine untuk menutup palang (§6.2).
 func TestIntegrasiResyncTidakMengumumkanKanalLOW(t *testing.T) {
-	g, dev, sim := siapkanResync(t, nil)
+	_, dev, sim, post := siapkanResync(t, nil)
 
-	post := g.LoopPost.Subscribe()
 	sebelum := dev.Stats().StatResyncs
 
 	putusLaluPulih(t, dev, sim) // lahan sepi: seluruh input LOW
@@ -451,9 +458,8 @@ func TestIntegrasiResyncTidakMenimpaEventYangLebihBaru(t *testing.T) {
 	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
 
 	// Controller melaporkan LOW pada potret, tetapi kendaraan tiba tepat setelahnya.
-	g, dev, sim := siapkanResync(t, nil)
+	_, dev, sim, post := siapkanResync(t, nil)
 
-	post := g.LoopPost.Subscribe()
 	if err := sim.SetInput(cfg.Pins.LoopUnder, true); err != nil {
 		t.Fatalf("SetInput: %v", err)
 	}
@@ -472,7 +478,7 @@ func TestIntegrasiResyncTidakMenimpaEventYangLebihBaru(t *testing.T) {
 func TestIntegrasiResyncMerekamPotretTerakhir(t *testing.T) {
 	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
 
-	_, dev, _ := siapkanResync(t, func(s *simdev.Device) {
+	_, dev, _, _ := siapkanResync(t, func(s *simdev.Device) {
 		if err := s.SetInput(cfg.Pins.LoopPre, true); err != nil {
 			t.Fatalf("SetInput: %v", err)
 		}
@@ -500,7 +506,7 @@ func TestIntegrasiResyncGagalTidakMerusakKoneksi(t *testing.T) {
 
 	// Keepalive dimatikan supaya membisukan simulator hanya melumpuhkan STAT, bukan
 	// ikut memicu deteksi controller bisu.
-	g, dev, sim := siapkanResync(t,
+	g, dev, sim, _ := siapkanResync(t,
 		func(s *simdev.Device) { s.Diamkan(true) },
 		tcpctl.WithPingInterval(0),
 		tcpctl.WithAckTimeout(50*time.Millisecond),
@@ -528,7 +534,7 @@ func TestIntegrasiResyncGagalTidakMerusakKoneksi(t *testing.T) {
 func TestIntegrasiResyncDapatDimatikan(t *testing.T) {
 	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
 
-	_, dev, _ := siapkanResync(t,
+	_, dev, _, _ := siapkanResync(t,
 		func(s *simdev.Device) {
 			if err := s.SetInput(cfg.Pins.LoopUnder, true); err != nil {
 				t.Fatalf("SetInput: %v", err)

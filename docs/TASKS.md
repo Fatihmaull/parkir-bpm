@@ -52,7 +52,10 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ⬜ 3.1 Paket `edge-api` sebagai service Windows/systemd `restart=always` + watchdog.
 - ✅ 3.2 Resync `STAT` semua controller saat startup/reconnect (rekonstruksi status) — hanya kanal
   HIGH yang diumumkan; potret tak menimpa kanal yang sudah diketahui.
-- ⬜ 3.3 Antrian perintah per device (tahan blip koneksi).
+- ✅ 3.3 Tahan blip koneksi per device — **rekonsiliasi keadaan, bukan antrian perintah**. Perintah
+  tetap tak pernah diantre (`ErrNotConnected`); yang disimpan adalah NIAT, lalu ditegaskan ulang
+  setelah resync. Rekonsiliasi tutup menuntut bukti positif loop bawah LOW — lebih ketat daripada
+  jalur hidup. Lihat K27–K31 di `docs/CATATAN_KEPUTUSAN.md`.
 - ✅ 3.4 Healthcheck internal + endpoint kesehatan per gerbang — probe berbatas waktu ke
   goroutine pemilik (gerbang tersendat dilaporkan, bukan menggantungkan healthcheck);
   `GET /api/v1/gates/:code/health`, rollup `gates_status` di `/api/v1/health`, event

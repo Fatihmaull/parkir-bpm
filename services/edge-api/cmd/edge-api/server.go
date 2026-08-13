@@ -19,14 +19,23 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 		_, chainOK := audit.Verify(entries)
 
 		// Status per gate_code — lahan boleh punya lebih dari satu gerbang masuk.
+		//
+		// Kesehatan tiap gerbang ikut disertakan (task 3.4) supaya satu permintaan cukup
+		// untuk halaman status lahan; rinciannya ada di /api/v1/gates/:code/health.
+		kes := svc.Health(0)
 		gates := fiber.Map{}
-		for _, spec := range svc.Specs() {
-			if r, ok := svc.Gate(spec.Code); ok {
-				gates[spec.Code] = fiber.Map{"kind": string(spec.Kind), "state": r.State()}
+		for _, h := range kes.Gates {
+			gates[h.Code] = fiber.Map{
+				"kind": h.Kind, "state": h.State, "health": h,
 			}
 		}
 		return c.JSON(fiber.Map{
+			// status = proses edge-api hidup dan melayani. Ia sengaja TIDAK ikut memburuk
+			// saat sebuah gerbang mati: pemantau yang me-restart edge-api karena satu
+			// controller tercabut justru menjatuhkan gerbang-gerbang lain yang masih sehat
+			// (P8). Kesehatan lahan dibaca dari gates_status.
 			"status":         "ok",
+			"gates_status":   kes.Status,
 			"node_id":        cfg.NodeID,
 			"env":            cfg.Env,
 			"gates":          gates,

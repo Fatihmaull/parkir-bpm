@@ -53,7 +53,10 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ✅ 3.2 Resync `STAT` semua controller saat startup/reconnect (rekonstruksi status) — hanya kanal
   HIGH yang diumumkan; potret tak menimpa kanal yang sudah diketahui.
 - ⬜ 3.3 Antrian perintah per device (tahan blip koneksi).
-- ⬜ 3.4 Healthcheck internal + endpoint kesehatan per gerbang.
+- ✅ 3.4 Healthcheck internal + endpoint kesehatan per gerbang — probe berbatas waktu ke
+  goroutine pemilik (gerbang tersendat dilaporkan, bukan menggantungkan healthcheck);
+  `GET /api/v1/gates/:code/health`, rollup `gates_status` di `/api/v1/health`, event
+  `gate.health.changed` hanya saat status berubah.
 - 🔧 3.5 Pemulihan < 15 dtk (NFR-2.3) — perlu tes restart di tengah transaksi.
 - ⬜ 3.6 Chaos test: cabut LAN controller, matikan Edge, kertas habis, internet putus.
 

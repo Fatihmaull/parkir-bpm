@@ -68,11 +68,11 @@ func (t *seqTickets) Next() (string, string) {
 // harness membangun controller + simulator gerbang. Timer diganti perekam manual —
 // test memicu Event{Kind:EvTimeout} sendiri, sehingga transisi deterministik (tanpa sleep).
 type harness struct {
-	c       *Controller
-	g       *sim.Gate
-	store   *fakeStore
-	audit   *fakeAudit
-	armed   []string // reason timeout yang sedang diarm
+	c     *Controller
+	g     *sim.Gate
+	store *fakeStore
+	audit *fakeAudit
+	armed []string // reason timeout yang sedang diarm
 }
 
 func newHarness(t *testing.T, allowMember bool, memReason string) *harness {
@@ -156,7 +156,7 @@ func TestInterlockPreventsCloseWhileLD2High(t *testing.T) {
 	h := newHarness(t, false, "")
 	h.fire(t, Event{Kind: EvLD1, High: true})
 	h.fire(t, Event{Kind: EvButton})
-	h.fire(t, Event{Kind: EvTicketTaken})     // OPEN, palang terbuka
+	h.fire(t, Event{Kind: EvTicketTaken})      // OPEN, palang terbuka
 	h.fire(t, Event{Kind: EvLD1, High: false}) // mobil tunggal, lepas loop depan
 	h.fire(t, Event{Kind: EvLD2, High: true})  // masuk CLEARING, kendaraan di bawah palang
 
@@ -274,5 +274,74 @@ func TestUnauthorizedPassage(t *testing.T) {
 	h.fire(t, Event{Kind: EvLD2, High: true}) // tak ada otorisasi
 	if !h.audit.has("UNAUTHORIZED_PASSAGE") {
 		t.Fatal("harus ada audit UNAUTHORIZED_PASSAGE")
+	}
+}
+
+// D3: kertas habis menghentikan casual, TAPI MEMBER TETAP MASUK (§5.4.3).
+//
+// Regresi. Keadaan LOCKED_NO_PAPER dulu tak muncul sama sekali di switch state, sehingga
+// gerbang berhenti menerima event apa pun begitu masuk ke sana — termasuk tap member yang
+// justru dijanjikan komentar di issueTicket. Ditemukan chaos test 3.6.
+func TestPaperOutMemberTetapMasuk(t *testing.T) {
+	h := newHarness(t, true, "")
+	h.g.Printer.SetStatus(hw.PrinterPaperOut)
+
+	h.fire(t, Event{Kind: EvLD1, High: true})
+	h.fire(t, Event{Kind: EvButton})
+	if h.c.State() != StateLockedNoPaper {
+		t.Fatalf("prasyarat: harus LOCKED_NO_PAPER, got %s", h.c.State())
+	}
+
+	h.fire(t, Event{Kind: EvRFID, UID: "04A1B2C3"})
+	if h.c.State() != StateOpen || h.barrierState() != hw.BarrierOpen {
+		t.Fatalf("member saat kertas habis: harus OPEN & palang terbuka, got %s / %v",
+			h.c.State(), h.barrierState())
+	}
+	if len(h.store.commits) != 1 {
+		t.Fatal("member harus tetap tercatat IN_PREMISES walau tanpa tiket")
+	}
+}
+
+// Kertas diisi ulang → gerbang pulih tanpa perlu restart. Pengemudi menekan tombol lagi.
+func TestPaperOutPulihSetelahKertasDiisi(t *testing.T) {
+	h := newHarness(t, false, "")
+	h.g.Printer.SetStatus(hw.PrinterPaperOut)
+
+	h.fire(t, Event{Kind: EvLD1, High: true})
+	h.fire(t, Event{Kind: EvButton})
+	if h.c.State() != StateLockedNoPaper {
+		t.Fatalf("prasyarat: harus LOCKED_NO_PAPER, got %s", h.c.State())
+	}
+
+	h.g.Printer.SetStatus(hw.PrinterOK) // petugas mengisi kertas
+	h.fire(t, Event{Kind: EvButton})
+
+	if h.c.State() != StateAwaitingPull {
+		t.Fatalf("setelah kertas diisi & tombol ditekan lagi: harus AWAITING_PULL, got %s",
+			h.c.State())
+	}
+}
+
+// Kendaraan yang menyerah dan pergi mengembalikan gerbang ke IDLE.
+//
+// Tanpa ini gerbang tetap terkunci bagi kendaraan BERIKUTNYA — yang tak punya urusan apa
+// pun dengan kertas habis.
+func TestPaperOutKendaraanPergiMembukaKunci(t *testing.T) {
+	h := newHarness(t, false, "")
+	h.g.Printer.SetStatus(hw.PrinterPaperOut)
+
+	h.fire(t, Event{Kind: EvLD1, High: true})
+	h.fire(t, Event{Kind: EvButton})
+	if h.c.State() != StateLockedNoPaper {
+		t.Fatalf("prasyarat: harus LOCKED_NO_PAPER, got %s", h.c.State())
+	}
+
+	h.fire(t, Event{Kind: EvLD1, High: false}) // kendaraan pergi
+
+	if h.c.State() != StateIdle {
+		t.Fatalf("kendaraan pergi: harus kembali IDLE, got %s", h.c.State())
+	}
+	if !h.audit.has("TICKET_VOID") {
+		t.Fatal("draft yang ditinggalkan harus di-VOID, bukan menggantung")
 	}
 }

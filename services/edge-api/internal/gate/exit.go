@@ -15,18 +15,18 @@ import (
 type XState string
 
 const (
-	XIdle            XState = "IDLE"
-	XIdentifying     XState = "IDENTIFYING"
+	XIdle             XState = "IDLE"
+	XIdentifying      XState = "IDENTIFYING"
 	XTransactionFound XState = "TRANSACTION_FOUND"
-	XDisputeHold     XState = "DISPUTE_HOLD"
-	XFareCalculated  XState = "FARE_CALCULATED"
-	XAwaitingPayment XState = "AWAITING_PAYMENT"
-	XPaid            XState = "PAID"
-	XOpening         XState = "OPENING"
-	XOpen            XState = "OPEN"
-	XClearing        XState = "CLEARING"
-	XClosing         XState = "CLOSING"
-	XFault           XState = "FAULT"
+	XDisputeHold      XState = "DISPUTE_HOLD"
+	XFareCalculated   XState = "FARE_CALCULATED"
+	XAwaitingPayment  XState = "AWAITING_PAYMENT"
+	XPaid             XState = "PAID"
+	XOpening          XState = "OPENING"
+	XOpen             XState = "OPEN"
+	XClearing         XState = "CLEARING"
+	XClosing          XState = "CLOSING"
+	XFault            XState = "FAULT"
 )
 
 // Metode pembayaran (PRD §6.1 / §11.2).
@@ -107,7 +107,7 @@ type Tariffs interface {
 
 // SettleInfo — data hasil pembayaran untuk disimpan (§6.2.1 masked PAN).
 type SettleInfo struct {
-	Tendered, ChangeGiven, BalanceAfter int64
+	Tendered, ChangeGiven, BalanceAfter        int64
 	ApprovalCode, BatchNo, MaskedPAN, CardType string
 }
 

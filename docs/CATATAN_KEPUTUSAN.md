@@ -438,6 +438,34 @@ biarkan kejadian mengalir.
 
 ---
 
+## 7d. Chaos test — task 3.6 (K38)
+
+### K38 — `LOCKED_NO_PAPER` tak punya jalan keluar sama sekali ⚠️ (diperbaiki)
+Keadaan `LOCKED_NO_PAPER` **tidak muncul di `switch c.state`** pada `Controller.Handle`.
+Sekali masuk, gerbang berhenti menerima event apa pun: tap member ditolak, tombol tak
+berfungsi, dan gerbang tetap mati **walau kertas sudah diisi ulang** — hanya restart proses
+yang memulihkannya.
+
+Komentar di `issueTicket` sudah menjanjikan "kertas habis: casual berhenti, member tetap
+bisa (§5.4.3)", tetapi janji itu tak pernah terwujud dalam kode. **D3 tidak berlaku di
+lapangan selama ini.**
+
+Ditemukan oleh chaos test 3.6 — bukan oleh pembacaan kode. Uji unit yang ada
+(`TestPaperOutLocksCasual`) hanya memeriksa bahwa gerbang MASUK ke keadaan itu; tak ada yang
+memeriksa apa yang terjadi sesudahnya. Itulah gunanya chaos test: uji unit memeriksa jalan
+yang kita bayangkan, chaos test memeriksa yang kita lupakan.
+
+Tiga jalan keluar ditambahkan:
+- **tap member** → masuk tanpa tiket (D3, janji yang akhirnya ditepati)
+- **tombol ditekan lagi** → `issueTicket` memeriksa ulang status printer; inilah jalur pulih
+  setelah petugas mengisi kertas, tanpa restart
+- **kendaraan pergi (LD1 turun)** → draft di-VOID, kembali `IDLE`. Tanpa ini gerbang tetap
+  terkunci bagi kendaraan **berikutnya**, yang tak punya urusan dengan kertas habis.
+
+*Sumber: `gate/entry.go:onLockedNoPaper`, `gate/entry_test.go`, `gatesvc/chaos_test.go`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -482,6 +510,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 | Tanggal | Perubahan |
 |---|---|
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
+| 2026-08-13 | K38 ditambahkan (task 3.6 — chaos test menemukan LOCKED_NO_PAPER buntu). |
 | 2026-08-13 | K35–K37 ditambahkan (task 3.5 — pemulihan, palang yatim, urutan perangkaian). |
 | 2026-08-13 | K32–K34 ditambahkan (task 3.1 — service + watchdog). |
 | 2026-08-13 | K27–K31 terimplementasi. K31 dikoreksi: ambang 2 dtk milik model antrian; model rekonsiliasi yang dipakai menuntut ambang yang berbeda (45 dtk, disamakan dengan `no_show`). |

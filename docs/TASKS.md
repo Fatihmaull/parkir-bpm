@@ -48,7 +48,7 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ✅ 2.6 Logika tutup dipicu sensor (LD rising→falling) pada driver nyata — `tcpctl` tersambung ke
   `gatesvc` untuk transport `tcp`.
 
-## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A)
+## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A) — ✅ TUNTAS kecuali pemulihan DATA (3.5, tertahan Epik 5)
 - ✅ 3.1 `edge-api` sebagai service systemd/Windows + watchdog — unit `Type=notify` dengan
   `WatchdogSec` (`deploy/systemd/`), NSSM + Scheduled Task untuk Windows (`deploy/windows/`),
   sd_notify di `internal/svcnotify`. Kegagalan fatal kini mematikan proses (dulu menggantung
@@ -69,7 +69,12 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
   yang ditinggalkan terbuka tak pernah ditutup — kini ditutup saat startup dengan bukti
   positif loop bawah LOW (K36). **Data: BELUM** — `memstore` in-process, restart menghapus
   seluruh kendaraan di dalam lahan. Terblokir task 5.1 (pgx). Lihat K35.
-- ⬜ 3.6 Chaos test: cabut LAN controller, matikan Edge, kertas habis, internet putus.
+- ✅ 3.6 Chaos test lahan (`gatesvc/chaos_test.go`): cabut LAN satu gerbang (lahan tetap
+  melayani, P8), kertas habis (casual berhenti, member tetap masuk, D3), internet putus
+  (gerbang tak tersentuh, outbox menumpuk, P1), + semua rusak sekaligus. "Edge mati" diuji
+  di lapisan driver (task 3.5). **Menemukan bug: `LOCKED_NO_PAPER` tak punya jalan keluar
+  sama sekali** — D3 tak berlaku di lapangan, dan gerbang tetap mati walau kertas diisi
+  ulang. Diperbaiki + 3 uji unit. Lihat K38.
 
 ## EPIK 4 — Peripheral Gerbang (Dev A)
 - ⬜ 4.1 Adapter Mesin Tiket Otomatis (menunggu H1: protokol/merek) — cetak QR, status kertas, jam.

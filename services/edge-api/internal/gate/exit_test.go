@@ -58,15 +58,15 @@ func (t fakeTariffs) Resolve(vt string) (RateCard, bool) {
 // ── harness ──
 
 type xharness struct {
-	c       *ExitController
-	g       *sim.Gate
-	store   *fakeExitStore
-	pay     *fakePayments
-	audit   *fakeAudit
-	edc     *sim.EDC
-	armed   []string
-	online  bool
-	nowT    time.Time
+	c      *ExitController
+	g      *sim.Gate
+	store  *fakeExitStore
+	pay    *fakePayments
+	audit  *fakeAudit
+	edc    *sim.EDC
+	armed  []string
+	online bool
+	nowT   time.Time
 }
 
 func newXHarness(t *testing.T, tx ExitTx) *xharness {

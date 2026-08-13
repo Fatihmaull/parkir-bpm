@@ -187,6 +187,8 @@ func (c *Controller) Handle(ctx context.Context, e Event) error {
 		return c.onClearing(ctx, e)
 	case StateRejected:
 		return c.onRejected(ctx, e)
+	case StateLockedNoPaper:
+		return c.onLockedNoPaper(ctx, e)
 	}
 	return nil
 }
@@ -243,6 +245,36 @@ func (c *Controller) onAwaitingPull(ctx context.Context, e Event) error {
 		return c.openForEntry(ctx, c.curTicket, "")
 	case e.Kind == EvTimeout && e.Reason == toPull:
 		// Tiket tak diambil → retract, VOID (§5.4.2).
+		_ = c.Void(ctx)
+		c.transition(StateIdle)
+		_ = c.d.Light.Set(ctx, hw.PatternRed)
+	}
+	return nil
+}
+
+// onLockedNoPaper menangani gerbang yang terkunci karena printer tak dapat mencetak
+// (§5.4.3).
+//
+// Sebelumnya keadaan ini TIDAK punya penanganan sama sekali — ia tak muncul di switch
+// state, sehingga sekali masuk, gerbang berhenti menerima event apa pun dan tetap mati
+// walau kertas sudah diisi ulang. Komentar di issueTicket sudah menjanjikan "member tetap
+// bisa", tetapi janji itu tak pernah terwujud dalam kode. Ditemukan oleh chaos test 3.6.
+func (c *Controller) onLockedNoPaper(ctx context.Context, e Event) error {
+	switch {
+	case e.Kind == EvRFID:
+		// D3: member tak butuh tiket — kartunya sendiri yang menjadi bukti masuk.
+		// Memutus akses penghuni karena printer adalah kegagalan yang tak perlu.
+		return c.handleMember(ctx, e.UID)
+
+	case e.Kind == EvButton:
+		// Casual mencoba lagi. issueTicket memeriksa ULANG status printer, jadi inilah
+		// jalur pulih setelah kertas diisi: petugas mengisi, pengemudi menekan lagi.
+		// Bila kertas masih habis, ia sekadar kembali ke keadaan ini.
+		return c.issueTicket(ctx)
+
+	case e.Kind == EvLD1 && !e.High:
+		// Kendaraan menyerah dan pergi. Tanpa cabang ini gerbang tetap terkunci bagi
+		// kendaraan BERIKUTNYA, yang tak punya urusan apa pun dengan kertas habis.
 		_ = c.Void(ctx)
 		c.transition(StateIdle)
 		_ = c.d.Light.Set(ctx, hw.PatternRed)

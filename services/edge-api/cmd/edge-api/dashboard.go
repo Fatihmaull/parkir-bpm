@@ -57,6 +57,9 @@ func registerDashboardRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Se
 			}
 			if r, ok := svc.Gate(s.Code); ok {
 				m["state"] = r.State()
+				m["nyata"] = r.Nyata()
+				m["device_status"] = r.StatusPerangkat()
+				m["disimulasikan"] = r.Disimulasikan()
 			}
 			gates = append(gates, m)
 		}

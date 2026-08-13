@@ -63,7 +63,12 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
   goroutine pemilik (gerbang tersendat dilaporkan, bukan menggantungkan healthcheck);
   `GET /api/v1/gates/:code/health`, rollup `gates_status` di `/api/v1/health`, event
   `gate.health.changed` hanya saat status berubah.
-- 🔧 3.5 Pemulihan < 15 dtk (NFR-2.3) — perlu tes restart di tengah transaksi.
+- 🔧 3.5 Pemulihan < 15 dtk (NFR-2.3). **Layanan: terpenuhi & terukur** — siklus penuh
+  SIGTERM→berhenti→nyala→`READY=1` = **2,01 dtk** terburuk dari 5 putaran (alat ukur:
+  `deploy/ukur-pemulihan.sh`). Restart di tengah transaksi diuji dan menemukan bug: palang
+  yang ditinggalkan terbuka tak pernah ditutup — kini ditutup saat startup dengan bukti
+  positif loop bawah LOW (K36). **Data: BELUM** — `memstore` in-process, restart menghapus
+  seluruh kendaraan di dalam lahan. Terblokir task 5.1 (pgx). Lihat K35.
 - ⬜ 3.6 Chaos test: cabut LAN controller, matikan Edge, kertas habis, internet putus.
 
 ## EPIK 4 — Peripheral Gerbang (Dev A)

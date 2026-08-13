@@ -382,6 +382,62 @@ menjawab**, bukan apa isi jawabannya.
 
 ---
 
+## 7c. Pemulihan setelah restart — task 3.5 (K35–K37)
+
+### K35 — Pemulihan LAYANAN tercapai; pemulihan DATA belum, dan tak bisa sampai Epik 5 ⚠️
+NFR-2.3 (< 15 dtk) **terpenuhi dan terukur**: siklus penuh SIGTERM → berhenti → nyala →
+`READY=1` adalah **2,01 dtk** terburuk dari 5 putaran, dan itu pun didominasi jeda
+`RestartSec=2s`. Berhenti ~0,00 dtk, nyala-sampai-siap ~0,01 dtk. Alat ukurnya ada di repo:
+`deploy/ukur-pemulihan.sh`.
+
+**Tetapi yang pulih hanyalah kemampuan melayani, bukan datanya.** `edge-api` masih memakai
+`memstore` in-process, jadi restart menghapus seluruh kendaraan yang sedang berada di dalam
+lahan, tiket aktif, dan rantai audit berjalan. Kendaraan yang masuk sebelum restart tak
+akan dikenali saat keluar.
+
+Ini **tidak dapat diperbaiki di Epik 3**. Persistensi adalah task 5.1 (repository pgx),
+yang terblokir Docker. Menuliskannya di sini supaya "NFR-2.3 terpenuhi" tidak pernah dibaca
+sebagai "restart itu aman bagi transaksi berjalan" — dua hal yang sangat berbeda, dan
+selisihnya adalah uang pelanggan.
+
+### K36 — Palang yang ditinggalkan proses sebelumnya ditutup saat startup ⚠️
+Relay controller mempertahankan posisinya melewati matinya edge-api. Proses yang mati saat
+palang terangkat meninggalkan gerbang **terbuka selamanya**: proses baru memulai state
+machine dari IDLE, tak punya kehendak apa pun untuk ditegaskan, dan tak satu pun pihak
+menutupnya.
+
+**Diukur sebelum ditulis.** Probe langsung terhadap simulator: setelah restart, relay palang
+tetap `true` dan potret `STAT` melaporkannya apa adanya (`outputs=[true false false false]`,
+`inputs` seluruhnya LOW) — pengetahuannya sudah ada, hanya tak ada yang bertindak.
+
+Syaratnya sama ketatnya dengan K30 — bukti **positif** loop bawah LOW — ditambah satu:
+potret `STAT` harus segar (≤ 10 dtk). Menutup atas dasar potret koneksi sebelumnya sama saja
+menutup buta.
+
+**Kenapa menutup, bukan sekadar membunyikan alarm:** palang menggantung terbuka adalah
+kebocoran pendapatan tanpa batas sekaligus lubang keamanan, sedangkan menutup saat loop bawah
+terbukti LOW secara fisik aman — tak ada yang di bawahnya. Alarm tetap dibunyikan
+(`SeverityCritical`); ia melengkapi penutupan, bukan menggantikannya.
+`SetCloseOrphanedBarrier(false)` = katup darurat.
+*Sumber: `tcpctl/rekonsiliasi.go:tutupPalangYatim`.*
+
+### K37 — Gerbang dirangkai SEBELUM koneksi dimulai ⚠️
+`NewGate` memasang penjaga interlock **dan** rekonsiliator. Dipanggil setelah `dev.Start`,
+koneksi pertama bisa terbentuk — beserta resync dan rekonsiliasinya — sebelum keduanya
+terpasang.
+
+Akibatnya bukan teoretis: pemeriksaan palang yatim (K36) hanya punya **satu** kesempatan,
+yaitu koneksi pertama, dan kesempatan itu terlewat. Ditemukan karena uji K36 gagal; jalur
+produksi (`gatesvc.buatPerangkatTCP`) ternyata punya urutan yang sama, sehingga rekonsiliasi
+3.3 pun bisa terlewat di koneksi pertama.
+
+Urutannya kini: `NewDevice` → `NewGate` → `Start`. Belum ada koneksi berarti belum ada yang
+bisa terlewat. Prinsip yang sama menyelamatkan uji resync dari flake — rangkai dulu, baru
+biarkan kejadian mengalir.
+*Sumber: `gatesvc/perangkat.go`, `tcpctl/rekonsiliasi_test.go:restartProses`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -426,5 +482,6 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 | Tanggal | Perubahan |
 |---|---|
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
+| 2026-08-13 | K35–K37 ditambahkan (task 3.5 — pemulihan, palang yatim, urutan perangkaian). |
 | 2026-08-13 | K32–K34 ditambahkan (task 3.1 — service + watchdog). |
 | 2026-08-13 | K27–K31 terimplementasi. K31 dikoreksi: ambang 2 dtk milik model antrian; model rekonsiliasi yang dipakai menuntut ambang yang berbeda (45 dtk, disamakan dengan `no_show`). |

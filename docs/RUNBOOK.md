@@ -150,6 +150,31 @@ masih melayani** (P8). Yang diuji hanya satu: apakah prosesnya masih menjawab. L
 
 ---
 
+### Mengukur waktu pemulihan (NFR-2.3)
+
+```bash
+./deploy/ukur-pemulihan.sh 5
+```
+
+Mengukur siklus penuh yang dialami lahan: `SIGTERM` → berhenti bersih → jeda `RestartSec` →
+proses baru → `READY=1`. Garis akhirnya `READY=1`, bukan "proses ada di daftar proses", karena
+pesan itu baru dikirim setelah gerbang dirangkai **dan** port HTTP terikat.
+
+Terakhir diukur: **2,01 dtk** terburuk dari 5 putaran (batas 15 dtk), didominasi jeda
+`RestartSec=2s`.
+
+> **`READY=1` tidak menunggu controller tersambung, dan itu disengaja.** Lahan dengan satu
+> controller mati harus tetap naik dan melayani gerbang lainnya (P8); menahan "siap" sampai
+> semua controller menyambung berarti satu kabel tercabut menahan seluruh lahan. Status
+> controller dibaca terpisah dari `/api/v1/health`.
+
+> **Yang pulih adalah LAYANAN, bukan DATA.** Selama `edge-api` memakai `memstore`, restart
+> menghapus seluruh kendaraan yang berada di dalam lahan — kendaraan yang masuk sebelum
+> restart tak akan dikenali saat keluar. Persistensi adalah task 5.1 (terblokir Docker).
+> Lihat K35 di [`CATATAN_KEPUTUSAN.md`](CATATAN_KEPUTUSAN.md).
+
+---
+
 ## 4. Health & observability
 
 - `GET /api/v1/health` (Edge): state gerbang, `sync.pending`, `chain.verified`, `ocr.count`.

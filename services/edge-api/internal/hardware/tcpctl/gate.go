@@ -66,6 +66,7 @@ func NewGate(dev *Device, cfg GateConfig) (*Gate, error) {
 	g.Barrier = &Barrier{
 		dev: dev, cfg: cfg, under: g.LoopPost,
 		maxUsiaNiatBuka: DefaultMaxOpenIntentAge,
+		tutupYatim:      true,
 	}
 
 	if cfg.BarrierMode == BarrierHold {
@@ -90,6 +91,14 @@ func NewGate(dev *Device, cfg GateConfig) (*Gate, error) {
 	go g.salurkanTap()
 	return g, nil
 }
+
+// SetCloseOrphanedBarrier menyalakan/mematikan penutupan palang yang ditinggalkan proses
+// sebelumnya (lihat Barrier.tutupPalangYatim). Bawaannya menyala.
+//
+// Katup darurat, sejalan dengan WithStatResync: bila di lapangan ternyata ada lahan yang
+// memang menghendaki palang tetap terangkat melewati restart — mis. mode gerbang terbuka
+// saat jam sibuk — mematikannya di sini lebih jujur daripada menambal di tempat lain.
+func (g *Gate) SetCloseOrphanedBarrier(aktif bool) { g.Barrier.tutupYatim = aktif }
 
 // SetMaxOpenIntentAge mengatur usia maksimum niat "buka" yang masih layak ditegaskan
 // ulang setelah reconnect. Nilai <= 0 mengembalikannya ke bawaan.
@@ -168,6 +177,9 @@ type Barrier struct {
 	// perlu diingat adalah kehendaknya, bukan berhasil-tidaknya pengiriman.
 	niat            niat
 	maxUsiaNiatBuka time.Duration
+
+	// tutupYatim menyalakan penutupan palang yang ditinggalkan proses sebelumnya.
+	tutupYatim bool
 }
 
 // Open menaikkan palang.

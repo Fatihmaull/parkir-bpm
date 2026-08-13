@@ -40,6 +40,14 @@ import (
 // menerima palang terbuka adalah kendaraan berikutnya yang belum membayar.
 const DefaultMaxOpenIntentAge = 45 * time.Second
 
+// usiaPotretMaks membatasi umur potret STAT yang boleh dipakai menilai palang yatim.
+//
+// Rekonsiliasi berjalan tepat setelah resync pada koneksi yang sama, jadi potretnya
+// semestinya berumur milidetik. Batas ini menjaga dari kasus resync gagal lalu potret
+// koneksi SEBELUMNYA dipakai — menutup palang atas dasar bacaan lama adalah menutup buta,
+// persis yang dilarang K30.
+const usiaPotretMaks = 10 * time.Second
+
 // niatPalang adalah keadaan palang yang dikehendaki lapisan atas.
 type niatPalang int
 
@@ -126,6 +134,9 @@ func (b *Barrier) tegaskanUlang(ctx context.Context) {
 	apa, pada := b.niat.baca()
 	switch apa {
 	case niatKosong:
+		// Tak ada kehendak yang bisa ditegaskan — tapi belum tentu tak ada yang perlu
+		// dikerjakan. Lihat tutupPalangYatim.
+		b.tutupPalangYatim(ctx)
 		return
 
 	case niatBuka:
@@ -172,6 +183,61 @@ func (b *Barrier) tegaskanUlang(ctx context.Context) {
 		}
 		b.jalankan(ctx, cmd, "tutup")
 	}
+}
+
+// tutupPalangYatim menutup palang yang ditinggalkan terbuka oleh proses SEBELUMNYA.
+//
+// Kenapa ada: relay controller mempertahankan posisinya melewati matinya edge-api. Kalau
+// proses mati saat palang terbuka — crash, restart deploy, listrik PC padam — palang itu
+// tetap terangkat, sementara proses baru memulai state machine dari IDLE dan tak punya
+// kehendak apa pun untuk ditegaskan. Tak ada satu pun pihak yang akan menutupnya, dan
+// setiap kendaraan berikutnya lewat gratis sampai ada manusia yang menyadarinya.
+//
+// Diukur sebelum ditulis: setelah restart, relay palang tetap ON dan potret STAT
+// melaporkannya apa adanya — pengetahuannya sudah ada, hanya tak ada yang bertindak.
+//
+// Syaratnya sama ketatnya dengan rekonsiliasi tutup biasa (K30) — bukti POSITIF loop
+// bawah LOW — ditambah satu: potret STAT harus segar. Menutup atas dasar potret koneksi
+// sebelumnya sama saja menutup buta.
+//
+// Kenapa menutup, bukan sekadar membunyikan alarm: palang yang menggantung terbuka adalah
+// kebocoran pendapatan tanpa batas sekaligus lubang keamanan, sedangkan menutup saat loop
+// bawah terbukti LOW secara fisik aman — tak ada yang berada di bawahnya. Alarm tetap
+// dibunyikan; ia tak menggantikan penutupan, hanya melengkapinya.
+func (b *Barrier) tutupPalangYatim(ctx context.Context) {
+	if !b.tutupYatim {
+		return
+	}
+
+	snap, ada := b.dev.LastStat()
+	if !ada || time.Since(snap.At) > usiaPotretMaks {
+		return // tak ada bacaan segar — tak bisa membuktikan palang terbuka
+	}
+	if !snap.Outputs[b.cfg.Pins.Barrier-1] {
+		return // palang memang tertutup; tak ada yang yatim
+	}
+
+	high, diketahui := b.under.dev.LoopState(b.under.ch)
+	if !diketahui || high {
+		alasan := "status loop bawah belum diketahui"
+		if diketahui {
+			alasan = "loop bawah HIGH — kendaraan masih di bawah palang"
+		}
+		b.dev.note(func(s *DeviceStats) { s.ReconcileSkipped++ })
+		b.dev.catat(DirTX, "", SeverityCritical,
+			"palang ditemukan TERBUKA tanpa pemilik dan tak dapat ditutup: "+alasan+
+				" — perlu diperiksa petugas")
+		return
+	}
+
+	cmd, err := OutOff(b.cfg.Pins.Barrier)
+	if err != nil {
+		return
+	}
+	b.dev.catat(DirTX, cmd, SeverityCritical,
+		"palang ditemukan TERBUKA tanpa pemilik setelah proses dimulai — ditutup "+
+			"(loop bawah terbukti LOW)")
+	b.jalankan(ctx, cmd, "tutup palang yatim")
 }
 
 // jalankan mengirim satu perintah rekonsiliasi dan mencatat hasilnya.

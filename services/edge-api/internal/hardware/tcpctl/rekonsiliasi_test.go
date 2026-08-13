@@ -291,3 +291,163 @@ func TestRekonsiliasiTakMenutupSaatLoopBawahTakDiketahui(t *testing.T) {
 		t.Fatalf("prasyarat uji gugur: status loop justru diketahui (high=%v)", high)
 	}
 }
+
+// ── Palang yatim setelah restart proses (task 3.5) ──
+
+// restartProses meniru edge-api yang mati lalu hidup lagi di atas controller yang SAMA.
+//
+// Relay controller mempertahankan posisinya melewati matinya proses — itulah inti
+// masalahnya, dan simulator berperilaku sama.
+func restartProses(t *testing.T, sim *simdev.Device, cfg tcpctl.GateConfig,
+	siap func(*tcpctl.Gate)) (*tcpctl.Gate, *tcpctl.Device) {
+	t.Helper()
+
+	dev := tcpctl.NewDevice(sim.Addr(),
+		tcpctl.WithReconnectBackoff(tcpctl.Backoff{Min: time.Millisecond, Max: 10 * time.Millisecond, Factor: 2}),
+		tcpctl.WithPingInterval(40*time.Millisecond),
+		tcpctl.WithAckTimeout(200*time.Millisecond),
+		tcpctl.WithDebounce(30*time.Millisecond),
+	)
+	// Sama seperti jalur produksi: rangkai gerbang dulu, baru sambungkan. Kalau
+	// dibalik, rekonsiliasi koneksi pertama bisa selesai sebelum rekonsiliatornya
+	// terpasang — dan koneksi pertama itulah satu-satunya kesempatan menemukan palang
+	// yang ditinggalkan proses sebelumnya.
+	g, err := tcpctl.NewGate(dev, cfg)
+	if err != nil {
+		t.Fatalf("NewGate: %v", err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	if siap != nil {
+		siap(g)
+	}
+
+	ctx, batal := context.WithCancel(context.Background())
+	t.Cleanup(batal)
+	dev.Start(ctx)
+	t.Cleanup(func() { _ = dev.Close() })
+	tungguSampai(t, func() bool { return dev.Status() == tcpctl.StatusOnline }, "driver ONLINE")
+
+	return g, dev
+}
+
+// Inti task 3.5: palang yang ditinggalkan TERBUKA oleh proses sebelumnya harus ditutup.
+//
+// Tanpa ini, edge-api yang mati saat palang terangkat meninggalkan gerbang terbuka
+// selamanya — proses baru memulai dari IDLE, tak punya kehendak untuk ditegaskan, dan tak
+// satu pun pihak menutupnya. Setiap kendaraan berikutnya lewat gratis.
+func TestPalangYatimDitutupSetelahRestart(t *testing.T) {
+	sim, err := simdev.New("", simdev.WithPulse(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("simdev.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sim.Close() })
+
+	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
+	pin := cfg.Pins.Barrier
+
+	// Proses pertama membuka palang, lalu mati.
+	g1, dev1 := restartProses(t, sim, cfg, nil)
+	if err := g1.Barrier.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tungguSampai(t, func() bool { return sim.Output(pin) }, "palang terbuka")
+	_ = g1.Close()
+	_ = dev1.Close()
+
+	if !sim.Output(pin) {
+		t.Fatal("prasyarat gugur: relay harusnya bertahan melewati matinya proses")
+	}
+
+	// Proses kedua: tak punya kehendak apa pun, tapi menemukan palang terangkat.
+	_, dev2 := restartProses(t, sim, cfg, nil)
+
+	tungguSampai(t, func() bool { return !sim.Output(pin) },
+		"palang yatim ditutup oleh proses baru")
+	tungguSampai(t, func() bool { return dev2.Stats().Reconciles > 0 }, "penutupan tercatat")
+}
+
+// Palang yatim TIDAK ditutup selama ada kendaraan di bawahnya. Syarat K30 berlaku penuh
+// di sini — justru di sini, karena proses baru tak tahu apa pun tentang kendaraan itu.
+func TestPalangYatimTakDitutupSaatAdaKendaraan(t *testing.T) {
+	sim, err := simdev.New("", simdev.WithPulse(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("simdev.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sim.Close() })
+
+	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
+	pin := cfg.Pins.Barrier
+
+	g1, dev1 := restartProses(t, sim, cfg, nil)
+	if err := g1.Barrier.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tungguSampai(t, func() bool { return sim.Output(pin) }, "palang terbuka")
+
+	// Kendaraan masuk ke bawah palang, LALU proses mati — kasus terburuk.
+	if err := sim.SetInput(cfg.Pins.LoopUnder, true); err != nil {
+		t.Fatalf("SetInput: %v", err)
+	}
+	_ = g1.Close()
+	_ = dev1.Close()
+
+	_, dev2 := restartProses(t, sim, cfg, nil)
+	tungguSampai(t, func() bool { return dev2.Stats().ReconcileSkipped > 0 },
+		"penutupan palang yatim dilewati & tercatat")
+
+	time.Sleep(300 * time.Millisecond)
+	if !sim.Output(pin) {
+		t.Fatal("palang menutup di atas kendaraan yang sudah ada sebelum proses ini hidup — pelanggaran P4")
+	}
+}
+
+// Palang yang memang tertutup tak boleh disentuh: rekonsiliasi yang memerintah tanpa
+// alasan sama berbahayanya dengan yang tak memerintah saat perlu.
+func TestPalangTertutupTakDisentuhSaatStartup(t *testing.T) {
+	sim, err := simdev.New("", simdev.WithPulse(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("simdev.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sim.Close() })
+
+	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
+	_, dev := restartProses(t, sim, cfg, nil)
+
+	time.Sleep(300 * time.Millisecond)
+	if got := dev.Stats().Reconciles; got != 0 {
+		t.Fatalf("Reconciles = %d, want 0 — tak ada yang perlu direkonsiliasi", got)
+	}
+	if sim.Output(cfg.Pins.Barrier) {
+		t.Fatal("palang bergerak tanpa ada yang memerintahkan")
+	}
+}
+
+// Katup darurat benar-benar mematikan penutupan palang yatim.
+func TestPalangYatimDapatDimatikan(t *testing.T) {
+	sim, err := simdev.New("", simdev.WithPulse(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("simdev.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sim.Close() })
+
+	cfg := tcpctl.DefaultGateConfig(tcpctl.GateEntry)
+	pin := cfg.Pins.Barrier
+
+	g1, dev1 := restartProses(t, sim, cfg, nil)
+	if err := g1.Barrier.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tungguSampai(t, func() bool { return sim.Output(pin) }, "palang terbuka")
+	_ = g1.Close()
+	_ = dev1.Close()
+
+	_, dev2 := restartProses(t, sim, cfg, func(g *tcpctl.Gate) { g.SetCloseOrphanedBarrier(false) })
+
+	time.Sleep(400 * time.Millisecond)
+	if !sim.Output(pin) {
+		t.Fatal("palang ditutup padahal penutupan palang yatim dimatikan")
+	}
+	if got := dev2.Stats().Reconciles; got != 0 {
+		t.Fatalf("Reconciles = %d, want 0", got)
+	}
+}

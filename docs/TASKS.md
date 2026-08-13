@@ -2,28 +2,44 @@
 
 Dipecah per **epik**, tanpa timeline. Tujuan: melihat total lingkup kerja membawa app ke siap-produksi.
 **Dev A** = Edge / hardware / pembayaran / sync. **Dev B** = Cloud / dashboard / POS / auth.
-Status: ✅ selesai · 🔧 sebagian · ⬜ belum.
+Status: ✅ selesai · 🔧 sebagian · ⬜ belum · 🚧 terblokir.
+
+> **Sinkron dengan Notion.** Papan kerja harian ada di database Backlog Notion (76 task, lengkap
+> dengan Assignee, Prioritas, dan relasi Resource). Berkas ini adalah cerminannya di repo agar
+> tetap terbaca tanpa akses Notion — **kalau keduanya berbeda, Notion yang benar.** Perbarui
+> berkas ini setiap kali satu epik bergerak, jangan menunggu semuanya selesai.
+
+**Blocker lintas-epik yang sedang berlaku (per 2026-08-13):**
+`edge-api` **belum punya lapisan basis data sama sekali** — tak ada pgx di `go.mod`, dan
+`config.Store` menyebut `memory|postgres` padahal hanya `memory` yang terimplementasi. Ini
+memblokir seluruh Epik 5 kecuali 5.5, dan menahan bagian "muat dari DB" pada task 2.1.
+Akarnya: PostgreSQL lokal butuh Docker, yang di Resources Notion masih berstatus *Belum Ada*.
 
 ---
 
-## EPIK 1 — Driver & Kontrak Hardware (Dev A)
-- ⬜ 1.1 Paket `internal/hardware/tcpctl`: klien TCP A6/A9 — parser framing Header/Footer.
-- ⬜ 1.2 Reconnect + exponential backoff + jitter; TCP keep-alive socket.
-- ⬜ 1.3 Keepalive `PING`/`PINGOK` 1 dtk; tandai OFFLINE setelah 3× gagal; event status device.
-- ⬜ 1.4 Korelasi perintah↔respons (`OUT1ON`→`OUT1ONOK`) + retry 3× + timeout.
-- ⬜ 1.5 Debounce input ≥150 ms di Edge; map `INxON/OFF` → `LoopEvent`.
-- ⬜ 1.6 Parser Wiegand `Wxxxxxx` (W-26/W-34) → `rfid_uid`.
-- ⬜ 1.7 Implementasi interface Layer-2 (`Barrier/LoopDetector/IndicatorLight/RFIDReader`) di atas tcpctl.
-- ⬜ 1.8 Ring buffer telemetry TX/RX + audit `≥ warning`.
-- ⬜ 1.9 Peta pin per gerbang dari `gates.config`; mode palang `hold|pulse`.
-- ⬜ 1.10 Uji integrasi driver terhadap **simulator TCP device** (server A6/A9 palsu) — CI-able.
+## EPIK 1 — Driver & Kontrak Hardware (Dev A) — ✅ TUNTAS
+Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
+- ✅ 1.1 Paket `internal/hardware/tcpctl`: klien TCP A6/A9 — parser framing Header/Footer.
+- ✅ 1.2 Reconnect + exponential backoff + jitter; TCP keep-alive socket.
+- ✅ 1.3 Keepalive `PING`/`PINGOK` 1 dtk; tandai OFFLINE setelah 3× gagal; event status device.
+- ✅ 1.4 Korelasi perintah↔respons (`OUT1ON`→`OUT1ONOK`) + retry 3× + timeout.
+- ✅ 1.5 Debounce input ≥150 ms di Edge; map `INxON/OFF` → `LoopEvent`.
+- ✅ 1.6 Parser Wiegand `Wxxxxxx` (W-26/W-34) → `rfid_uid`.
+- ✅ 1.7 Implementasi interface Layer-2 (`Barrier/LoopDetector/IndicatorLight/RFIDReader`) di atas tcpctl.
+- ✅ 1.8 Ring buffer telemetry TX/RX + audit `≥ warning`.
+- ✅ 1.9 Peta pin per gerbang dari `gates.config`; mode palang `hold|pulse`.
+- ✅ 1.10 Uji integrasi driver terhadap **simulator TCP device** (`tcpctl/simdev`) — CI-able.
 - ✅ 1.11 Interface Layer-2 & simulator perangkat generik (sudah ada dari v2).
 
 ## EPIK 2 — Manajer Multi-Gerbang & Keselamatan Edge (Dev A)
-- ⬜ 2.1 Generalisasi `gatesvc`: muat daftar `gates` dari DB, N controller, goroutine pemilik per device.
-- ⬜ 2.2 Event WS berlabel `gate_code` (bukan entry/exit tunggal).
-- 🔧 2.3 Interlock keselamatan di Edge (tolak tutup saat loop bawah HIGH) — ada di state machine, perlu
-  penegakan di jalur driver nyata.
+- ✅ 2.1 Generalisasi `gatesvc`: N controller + goroutine pemilik per device (PR #4).
+  **Sebagian:** memuat daftar `gates` dari DB belum ada — `edge-api` belum punya lapisan DB
+  sama sekali dan task 5.1 masih Terblokir. `gatesvc.GateSource` adalah tempat sambungnya;
+  sumber saat ini `SpecsFromConfig` (dari `.env`).
+- ✅ 2.2 Event WS berlabel `gate_code` + endpoint `/api/v1/sim/gates/:code/...` (PR #4).
+- ✅ 2.3 Interlock keselamatan ditegakkan di jalur driver nyata — `tcpctl.Barrier.Close` +
+  penjaga perintah di dalam gelang retry (PR #3). Tidak berlaku pada `barrier_mode: pulse`
+  (palang turun oleh mekanismenya sendiri; Edge tak punya perintah tutup).
 - ⬜ 2.4 Timer pengaman Edge: auto-close 60 dtk, `BARRIER_BLOCKED` (>120s), `VEHICLE_STALLED`.
 - ✅ 2.5 State machine masuk & keluar + anti-tailgating (v2, teruji).
 - ⬜ 2.6 Logika tutup dipicu sensor (LD rising→falling) pada driver nyata.

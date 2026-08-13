@@ -2,10 +2,17 @@
 
 [![CI](https://github.com/Fatihmaull/parkir-bpm/actions/workflows/ci.yml/badge.svg)](https://github.com/Fatihmaull/parkir-bpm/actions/workflows/ci.yml)
 
-Sistem manajemen gerbang & parkir _offline-first_, multi-tenant. Implementasi mengacu pada
-**PRD Pondasi v2.0.0** ([`docs/PRD_PONDASI.md`](docs/PRD_PONDASI.md)).
+Sistem manajemen gerbang & parkir _offline-first_, multi-tenant.
 
-> **Source of truth:** PRD Pondasi. Jika kode dan PRD bertentangan, PRD menang sampai PRD direvisi.
+> **Source of truth berlapis.** [`docs/PRD_PONDASI.md`](docs/PRD_PONDASI.md) (v2) memegang detail
+> transaksional yang tidak berubah: state machine gerbang, fare engine, rantai audit, tarif
+> versioned. [`docs/PRD_v3_ENTERPRISE.md`](docs/PRD_v3_ENTERPRISE.md) **menang** untuk arsitektur
+> baru: topologi 3-tier, kontrak hardware A6/A9-TCP, manajer multi-gerbang, zero-downtime.
+> Ringkasan perbedaannya: [`docs/CHANGES_v2_to_v3.md`](docs/CHANGES_v2_to_v3.md).
+> Jika kode dan PRD bertentangan, PRD menang sampai PRD direvisi.
+
+**Progres pekerjaan:** papan utama di Notion (database Backlog); cerminannya di repo ada di
+[`docs/TASKS.md`](docs/TASKS.md).
 
 ---
 
@@ -20,6 +27,8 @@ Sistem manajemen gerbang & parkir _offline-first_, multi-tenant. Implementasi me
 | P5 | Uang & audit bersifat _append-only_. |
 | P6 | Multi-tenant sejak baris pertama (`tenant_id`, `site_id`). |
 | P7 | Semua perangkat punya simulator. |
+| P8 | Zero-downtime operasional per lahan (v3). |
+| P9 | Controller tidak dipercaya untuk keselamatan — interlock & timer ditegakkan di Edge (v3). |
 
 ## Topologi (lihat PRD §4)
 
@@ -45,6 +54,9 @@ parkir/
 ├── proto/                   Kontrak protokol perangkat — PRD §5.3
 ├── services/
 │   ├── edge-api/            Backend Edge (Go)   — logika transaksi, state machine, audit
+│   │   └── internal/
+│   │       ├── hardware/tcpctl/   Driver controller A6/A9-TCP (+ simdev: simulator TCP)
+│   │       └── gatesvc/           Manajer N gerbang, satu goroutine pemilik per gerbang
 │   ├── cloud-api/           Backend Cloud (Go)  — sync, agregasi, dashboard API
 │   └── lpr-svc/             LPR/OCR (Python + gRPC)
 ├── apps/
@@ -63,7 +75,7 @@ parkir/
 
 | Komponen | Kebutuhan |
 |----------|-----------|
-| Go       | 1.22+ (edge-api, cloud-api) — **belum terpasang di mesin ini** |
+| Go       | 1.22+ (edge-api, cloud-api) |
 | Node     | 22+ (web apps, packages) ✅ |
 | Python   | 3.11+ (lpr-svc) ✅ |
 | Docker   | + Compose (orkestrasi) ✅ |
@@ -90,7 +102,17 @@ curl -XPOST localhost:8080/api/v1/sim/entry/loop -d '{"loop":"post","high":false
 curl localhost:8080/api/v1/health                                                   # lihat state + rantai audit
 ```
 
-Event real-time via WebSocket: `ws://localhost:8080/api/v1/stream`.
+Endpoint di atas menyentuh gerbang **pertama** tiap jenis. Sejak multi-gerbang (task 2.1/2.2) ada
+jalur yang beralamat `gate_code` — pakai ini untuk kode baru:
+
+```bash
+curl localhost:8080/api/v1/gates                                   # daftar gerbang + state
+curl -XPOST localhost:8080/api/v1/sim/gates/GATE-IN-01/loop -d '{"loop":"pre","high":true}'
+curl localhost:8080/api/v1/gates/GATE-IN-01/state
+```
+
+Event real-time via WebSocket: `ws://localhost:8080/api/v1/stream`. Setiap event membawa
+`gate_code` + `gate_kind`, sehingga lahan dengan lebih dari satu gerbang masuk tetap terbedakan.
 
 **Mode dengan PostgreSQL (produksi):**
 

@@ -7,6 +7,10 @@ transaksional yang tak berubah — state machine, fare engine, rantai audit, tar
 [`docs/PRD_v3_ENTERPRISE.md`](docs/PRD_v3_ENTERPRISE.md) **menang** untuk arsitektur baru: topologi
 3-tier, kontrak hardware A6/A9-TCP, multi-gerbang, zero-downtime.
 
+**Kenapa sesuatu dibuat begitu:** [`docs/CATATAN_KEPUTUSAN.md`](docs/CATATAN_KEPUTUSAN.md) — rekaman
+keputusan berikut *harga* yang direlakan tiap keputusan. Baca sebelum "memperbaiki" perilaku yang
+terasa aneh; banyak di antaranya disengaja. Bagian "Invarian" di bawah adalah ringkasannya saja.
+
 ## Prinsip yang mengikat (PRD §3)
 
 P1 offline-first · P2 ketersediaan > kesempurnaan data · P3 hardware tak dipercaya ·

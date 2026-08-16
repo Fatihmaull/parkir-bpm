@@ -7,6 +7,10 @@ transaksional yang tak berubah — state machine, fare engine, rantai audit, tar
 [`docs/PRD_v3_ENTERPRISE.md`](docs/PRD_v3_ENTERPRISE.md) **menang** untuk arsitektur baru: topologi
 3-tier, kontrak hardware A6/A9-TCP, multi-gerbang, zero-downtime.
 
+**Kenapa sesuatu dibuat begitu:** [`docs/CATATAN_KEPUTUSAN.md`](docs/CATATAN_KEPUTUSAN.md) — rekaman
+keputusan berikut *harga* yang direlakan tiap keputusan. Baca sebelum "memperbaiki" perilaku yang
+terasa aneh; banyak di antaranya disengaja. Bagian "Invarian" di bawah adalah ringkasannya saja.
+
 ## Prinsip yang mengikat (PRD §3)
 
 P1 offline-first · P2 ketersediaan > kesempurnaan data · P3 hardware tak dipercaya ·
@@ -50,9 +54,10 @@ Baca ini sebelum merencanakan pekerjaan — beberapa hal yang tampak "tinggal di
 - **Tidak ada lapisan basis data di `edge-api`.** Tak ada pgx di `go.mod`; `config.Store` menyebut
   `memory|postgres` tapi hanya `memory` (`internal/memstore`) yang jalan. Ini memblokir Epik 5
   (kecuali 5.5) dan bagian "muat gerbang dari DB" pada task 2.1.
-- **Driver A6/A9 (`tcpctl`) lengkap tetapi belum menggantikan simulator di jalur produksi.**
-  `gatesvc` masih merangkai `sim.Gate` untuk setiap gerbang. Menyambungkan `tcpctl.Gate` ke
-  `gatesvc` untuk `transport: tcp` belum dikerjakan.
+- **Driver A6/A9 (`tcpctl`) sudah tersambung ke jalur produksi** sejak task 2.6 — `gatesvc`
+  merangkai `tcpctl.Gate` untuk gerbang bertransport `tcp`. Yang MASIH tersimulasi: printer di
+  gerbang masuk (task 4.1 terblokir H1). Daftarnya terbuka di `gatesvc.Runner.Disimulasikan()`
+  dan `/api/v1/gates` — jangan mengira seluruh gerbang sudah sungguhan.
 - **Printer tiket belum punya adapter konkret** — terblokir H1 (merek/protokol belum dikonfirmasi
   klien). Gerbang masuk nyata belum bisa lengkap tanpa ini.
 - `go test -race` **tidak bisa jalan di mesin dev Windows** (butuh cgo/gcc). CI Linux adalah
@@ -64,12 +69,24 @@ Ditemukan mahal, jangan dibongkar tanpa alasan kuat:
 
 - **Perintah ke controller tak pernah diantre saat terputus** (`tcpctl.ErrNotConnected`).
   `OUT1OFF` yang tertahan lalu terkirim beberapa detik kemudian bisa menutup palang di atas
-  kendaraan lain. Antrian sadar-konteks adalah task 3.3, bukan ditambahkan diam-diam.
+  kendaraan lain. Ini tetap berlaku setelah task 3.3: yang ditambahkan bukan antrian perintah
+  melainkan **rekonsiliasi niat** (`tcpctl/rekonsiliasi.go`) — keadaan yang dikehendaki ditegaskan
+  ulang setelah koneksi pulih, dengan syarat keselamatan diperiksa pada detik penegasan itu.
+- **Rekonsiliasi tutup menuntut bukti positif loop bawah LOW**, lebih ketat daripada
+  `periksaInterlock` di jalur hidup. Jalur hidup boleh menutup saat status tak diketahui karena ia
+  baru saja melihat LD2 turun; rekonsiliator tak melihat apa pun. Jangan "menyeragamkan" keduanya.
 - **Interlock diperiksa ulang di setiap percobaan retry**, bukan sekali di awal
   (`tcpctl.WithCommandGuard`). Satu `Exec` merentang ratusan milidetik dan loop bawah bisa
   berubah HIGH di tengahnya.
 - **Debounce input berbasis stabilitas, bukan tepi pertama.** Palang menutup pada tepi *turun*
   loop bawah; satu pantulan LOW palsu yang lolos bisa menutup palang di atas kendaraan.
+- **Resync STAT hanya mengumumkan kanal HIGH** (`tcpctl.Device.tanamkanStat`, task 3.2). LOW
+  adalah keadaan istirahat: saat lahan sepi keempat kanal LOW, jadi mengumumkannya berarti
+  memancarkan empat tepi *turun* palsu di tiap reconnect — perintah tutup untuk kendaraan yang
+  tak ada. Jangan "melengkapi" resync dengan mengumumkan LOW.
+- **Potret STAT tak pernah menimpa kanal yang sudah diketahui** (`Debouncer.Seed`). Balasan STAT
+  bisa tiba setelah event `INxON/INxOFF` yang lebih baru; menimpanya memundurkan status ke
+  masa lalu.
 - **Setiap gerbang dimiliki satu goroutine** (`gatesvc.Runner`). Jangan menambahkan mutex global
   atau menyentuh state machine dari luar inbox-nya.
 - **Setiap event membawa `gate_code`.** Jangan menambah event tanpa label itu — lahan bisa punya

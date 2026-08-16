@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
@@ -75,6 +76,10 @@ type Config struct {
 	// Ambang pengaman Edge (task 2.4). Nilai 0 memakai bawaan.
 	BlockedAfter time.Duration // LD2/LD4 HIGH terlalu lama → BARRIER_BLOCKED
 	StalledAfter time.Duration // LD1/LD3 HIGH terlalu lama → VEHICLE_STALLED
+
+	// Healthcheck internal (task 3.4). Nilai 0 memakai bawaan.
+	HealthInterval     time.Duration // jarak antar sampel
+	HealthProbeTimeout time.Duration // batas tunggu satu probe ke goroutine pemilik
 }
 
 // Service menjalankan N gerbang di atas perangkat + memstore + hub.
@@ -86,6 +91,14 @@ type Service struct {
 	hub   *wsbus.Hub
 	lpr   lpr.Recognizer
 	lprDL time.Duration
+
+	// Irama healthcheck internal (task 3.4).
+	healthInterval time.Duration
+	healthTimeout  time.Duration
+
+	// sapuanTerakhir — waktu selesainya sapuan healthcheck terakhir (unix nano),
+	// bukti hidupnya mesin internal bagi watchdog service (task 3.1).
+	sapuanTerakhir atomic.Int64
 
 	stop        chan struct{}
 	tutupSekali sync.Once
@@ -125,14 +138,25 @@ func New(cfg Config, hub *wsbus.Hub, store *memstore.Store) (*Service, error) {
 		return nil, err
 	}
 
+	hi := cfg.HealthInterval
+	if hi <= 0 {
+		hi = DefaultHealthInterval
+	}
+	ht := cfg.HealthProbeTimeout
+	if ht <= 0 {
+		ht = DefaultProbeTimeout
+	}
+
 	s := &Service{
-		gates: make(map[string]*Runner, len(specs)),
-		order: make([]string, 0, len(specs)),
-		store: store,
-		hub:   hub,
-		lpr:   rec,
-		lprDL: dl,
-		stop:  make(chan struct{}),
+		gates:          make(map[string]*Runner, len(specs)),
+		order:          make([]string, 0, len(specs)),
+		store:          store,
+		hub:            hub,
+		lpr:            rec,
+		lprDL:          dl,
+		healthInterval: hi,
+		healthTimeout:  ht,
+		stop:           make(chan struct{}),
 	}
 
 	for _, spec := range specs {
@@ -196,6 +220,11 @@ func (s *Service) Start() {
 		go r.milik()
 		r.mulaiPenerus()
 	}
+
+	// Healthcheck internal (task 3.4): satu goroutine untuk seluruh lahan, di luar
+	// goroutine pemilik mana pun supaya gerbang yang tersendat tetap bisa dilaporkan.
+	s.wg.Add(1)
+	go s.jalankanHealthcheck(s.healthInterval, s.healthTimeout)
 }
 
 // Close menghentikan seluruh gerbang dan menunggu goroutine pemiliknya selesai.

@@ -45,6 +45,20 @@ func registerGateRoutes(app *fiber.App, svc *gatesvc.Service) {
 		return c.JSON(fiber.Map{"gate_code": r.Spec().Code, "state": r.State()})
 	})
 
+	// Kesehatan satu gerbang (task 3.4).
+	//
+	// Balasannya SELALU 200 selama gerbangnya dikenal: "gerbang ini down" adalah jawaban
+	// yang berhasil, bukan kegagalan permintaan. Memetakannya ke 503 akan membuat
+	// pemantau di luar tak bisa membedakan gerbang yang mati dari edge-api yang mati —
+	// padahal justru itu bedanya yang perlu diketahui operator (P8).
+	app.Get("/api/v1/gates/:code/health", func(c *fiber.Ctx) error {
+		r, err := cariGate(svc, c)
+		if err != nil {
+			return err
+		}
+		return c.JSON(r.Health(0))
+	})
+
 	g := app.Group("/api/v1/sim/gates/:code")
 
 	g.Post("/loop", func(c *fiber.Ctx) error {

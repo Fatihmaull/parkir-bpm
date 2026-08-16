@@ -8,7 +8,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -24,15 +27,34 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
 	"github.com/jabar-creative/parkir/edge-api/internal/lpr"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
+	"github.com/jabar-creative/parkir/edge-api/internal/svcnotify"
 	"github.com/jabar-creative/parkir/edge-api/internal/syncagent"
 	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
 )
 
+// shutdownGrace membatasi lama menutup HTTP dengan rapi.
+//
+// Sengaja jauh di bawah NFR-2.3 (pulih < 15 dtk): waktu itu harus memuat berhenti DAN
+// nyala kembali, jadi separuhnya saja untuk berhenti sudah terlalu banyak.
+const shutdownGrace = 5 * time.Second
+
 func main() {
+	// Seluruh jalur fatal keluar lewat sini dengan status bukan-nol.
+	//
+	// Ini syarat mutlak bagi manajer service: `Restart=always` hanya menangkap proses
+	// yang MATI. Proses yang tetap hidup setelah kegagalan fatal terbaca "aktif" oleh
+	// systemd maupun NSSM, tidak pernah dinyalakan ulang, dan gerbang berhenti melayani
+	// tanpa satu pun alarm berbunyi.
+	if err := run(); err != nil {
+		slog.Error("edge-api berhenti karena kesalahan fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("gagal memuat config", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("gagal memuat config: %w", err)
 	}
 
 	slog.SetDefault(newLogger(cfg.LogLevel))
@@ -62,8 +84,7 @@ func main() {
 		Source: gatesvc.SpecsFromConfig(cfg),
 	}, hub, store)
 	if err != nil {
-		slog.Error("konfigurasi gerbang tidak sah", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("konfigurasi gerbang tidak sah: %w", err)
 	}
 	svc.Start()
 	defer svc.Close()
@@ -81,7 +102,7 @@ func main() {
 			hub.Publish("alert.raised", map[string]any{"type": typ, "severity": sev, "message": msg})
 		},
 	}); err != nil {
-		slog.Error("gagal register cron", "err", err)
+		return fmt.Errorf("gagal register cron: %w", err)
 	}
 	c.Start()
 	defer c.Stop()
@@ -106,24 +127,103 @@ func main() {
 	})
 	registerRoutes(app, cfg, svc, hub)
 
-	go func() {
-		addr := ":" + strconv.Itoa(cfg.HTTPPort)
-		slog.Info("HTTP listen", "addr", addr)
-		if err := app.Listen(addr); err != nil {
-			slog.Error("server berhenti", "err", err)
-		}
-	}()
+	// Soket dibuka SEBELUM melayani, bukan di dalam goroutine.
+	//
+	// app.Listen menggabungkan "mengikat port" dengan "melayani selamanya", sehingga
+	// kegagalan bind — port dipakai proses lain, izin kurang — hanya terlihat sebagai
+	// error di dalam goroutine. Dengan memisahkannya, port yang tak bisa diikat menjadi
+	// kegagalan startup yang jujur, dan READY=1 baru dikirim setelah soket benar-benar
+	// ada. Manajer service karenanya tak pernah mengumumkan "siap" untuk proses yang
+	// sebenarnya tak mendengarkan apa pun.
+	addr := ":" + strconv.Itoa(cfg.HTTPPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("gagal mengikat %s: %w", addr, err)
+	}
+	slog.Info("HTTP listen", "addr", addr)
+
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- app.Listener(ln) }()
+
+	// Manajer service (systemd) — tanpa-operasi di luar systemd.
+	notifier, err := svcnotify.New()
+	if err != nil {
+		return fmt.Errorf("gagal menyiapkan notifikasi service: %w", err)
+	}
+	defer func() { _ = notifier.Close() }()
+
+	if err := notifier.Ready(); err != nil {
+		return fmt.Errorf("gagal mengumumkan siap: %w", err)
+	}
+	_ = notifier.Status(fmt.Sprintf("melayani %d gerbang di %s", len(svc.Specs()), addr))
+
+	wdCtx, wdCancel := context.WithCancel(context.Background())
+	defer wdCancel()
+	go jalankanWatchdog(wdCtx, notifier, svc)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	slog.Info("shutdown diminta")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	// Server yang berhenti sendiri adalah kegagalan fatal, bukan kejadian yang cukup
+	// dicatat: tanpa HTTP, POS dan dashboard lahan buta sepenuhnya.
+	select {
+	case <-quit:
+		slog.Info("shutdown diminta")
+	case err := <-srvErr:
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			return fmt.Errorf("server HTTP berhenti sendiri: %w", err)
+		}
+		return errors.New("server HTTP berhenti sendiri tanpa diminta")
+	}
+
+	_ = notifier.Stopping()
+	_ = notifier.Status("berhenti")
+	wdCancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	if err := app.ShutdownWithContext(ctx); err != nil {
-		slog.Error("shutdown error", "err", err)
+		// Shutdown yang tak tuntas tetap diteruskan ke penutupan gerbang: palang dan
+		// controller lebih penting untuk ditutup rapi daripada koneksi HTTP yang tersisa.
+		slog.Error("shutdown HTTP tak tuntas", "err", err)
 	}
 	slog.Info("edge-api berhenti bersih")
+	return nil
+}
+
+// jalankanWatchdog membuktikan ke manajer service bahwa proses ini masih berjalan.
+//
+// Yang dibuktikan adalah HIDUPNYA MESIN INTERNAL, bukan sehatnya gerbang. Gerbang yang
+// controller-nya tercabut harus terbaca "down" di endpoint kesehatan, tetapi tak boleh
+// membuat watchdog membunuh edge-api: restart tak menyambungkan kabel, dan ia menjatuhkan
+// gerbang-gerbang lain yang masih melayani (P8). Lihat K26 di docs/CATATAN_KEPUTUSAN.md.
+func jalankanWatchdog(ctx context.Context, n *svcnotify.Notifier, svc *gatesvc.Service) {
+	jeda := n.WatchdogInterval()
+	if jeda <= 0 {
+		return // manajer service tak meminta watchdog
+	}
+	slog.Info("watchdog service aktif", "jeda", jeda)
+
+	t := time.NewTicker(jeda)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if !svc.MesinInternalHidup() {
+				// Ping SENGAJA ditahan: inilah satu-satunya cara memberi tahu manajer
+				// service bahwa proses ini perlu dimatikan dan dinyalakan ulang.
+				slog.Error("gelang healthcheck internal berhenti menyapu — watchdog ditahan",
+					"sapuan_terakhir", svc.LastHealthSweep())
+				continue
+			}
+			if err := n.Watchdog(); err != nil {
+				slog.Warn("gagal mengirim watchdog", "err", err)
+			}
+		}
+	}
 }
 
 func newLogger(level string) *slog.Logger {

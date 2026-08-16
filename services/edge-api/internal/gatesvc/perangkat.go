@@ -78,14 +78,21 @@ func buatPerangkatSim(kind GateKind) *perangkat {
 // yang pertama; lihat `disimulasikan`.
 func buatPerangkatTCP(ctx context.Context, spec GateSpec, cfg Config) (*perangkat, error) {
 	dev := tcpctl.NewDevice(spec.Endpoint)
-	dev.Start(ctx)
 
+	// Gerbang dirangkai SEBELUM dev.Start, bukan sesudahnya.
+	//
+	// NewGate-lah yang memasang penjaga interlock dan rekonsiliator. Dijalankan setelah
+	// Start, koneksi pertama bisa terbentuk — beserta resync dan rekonsiliasinya — sebelum
+	// keduanya terpasang, sehingga palang yang ditinggalkan terbuka oleh proses sebelumnya
+	// luput dari pemeriksaan pada satu-satunya kesempatan yang ada. Merangkai lebih dulu
+	// menutup jendela itu: belum ada koneksi, jadi belum ada yang bisa terlewat.
 	gcfg := tcpctl.DefaultGateConfig(tcpctl.GateKind(spec.Kind))
 	g, err := tcpctl.NewGate(dev, gcfg)
 	if err != nil {
 		_ = dev.Close()
 		return nil, fmt.Errorf("gatesvc: gerbang %s: %w", spec.Code, err)
 	}
+	dev.Start(ctx)
 
 	p := &perangkat{
 		Barrier: g.Barrier, Light: g.Light, RFID: g.RFID,

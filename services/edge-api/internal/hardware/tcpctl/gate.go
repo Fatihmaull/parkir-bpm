@@ -63,7 +63,11 @@ func NewGate(dev *Device, cfg GateConfig) (*Gate, error) {
 	g.LoopPost = &Loop{dev: dev, ch: cfg.Pins.LoopUnder}
 	g.RFID = &Reader{}
 	g.Light = &Light{dev: dev, green: cfg.Pins.GreenLight, red: cfg.Pins.RedLight}
-	g.Barrier = &Barrier{dev: dev, cfg: cfg, under: g.LoopPost}
+	g.Barrier = &Barrier{
+		dev: dev, cfg: cfg, under: g.LoopPost,
+		maxUsiaNiatBuka: DefaultMaxOpenIntentAge,
+		tutupYatim:      true,
+	}
 
 	if cfg.BarrierMode == BarrierHold {
 		perintahTutup, err := OutOff(cfg.Pins.Barrier)
@@ -78,10 +82,31 @@ func NewGate(dev *Device, cfg GateConfig) (*Gate, error) {
 		})
 	}
 
+	// Rekonsiliasi keadaan setelah blip koneksi (task 3.3). Device memanggilnya
+	// setiap koneksi terbentuk, SETELAH resync STAT — lihat SetReconciler.
+	dev.SetReconciler(g.tegaskanUlang)
+
 	g.wg.Add(2)
 	go g.salurkanLoop()
 	go g.salurkanTap()
 	return g, nil
+}
+
+// SetCloseOrphanedBarrier menyalakan/mematikan penutupan palang yang ditinggalkan proses
+// sebelumnya (lihat Barrier.tutupPalangYatim). Bawaannya menyala.
+//
+// Katup darurat, sejalan dengan WithStatResync: bila di lapangan ternyata ada lahan yang
+// memang menghendaki palang tetap terangkat melewati restart — mis. mode gerbang terbuka
+// saat jam sibuk — mematikannya di sini lebih jujur daripada menambal di tempat lain.
+func (g *Gate) SetCloseOrphanedBarrier(aktif bool) { g.Barrier.tutupYatim = aktif }
+
+// SetMaxOpenIntentAge mengatur usia maksimum niat "buka" yang masih layak ditegaskan
+// ulang setelah reconnect. Nilai <= 0 mengembalikannya ke bawaan.
+func (g *Gate) SetMaxOpenIntentAge(d time.Duration) {
+	if d <= 0 {
+		d = DefaultMaxOpenIntentAge
+	}
+	g.Barrier.maxUsiaNiatBuka = d
 }
 
 // Config mengembalikan konfigurasi gerbang yang dipakai.
@@ -91,6 +116,9 @@ func (g *Gate) Config() GateConfig { return g.cfg }
 // ikut ditutup — pemiliknya yang mengatur itu.
 func (g *Gate) Close() error {
 	g.tutupSekali.Do(func() {
+		// Lepas dulu: rekonsiliasi yang menyusul tak boleh menyentuh gerbang yang
+		// sudah ditutup.
+		g.dev.SetReconciler(nil)
 		close(g.selesai)
 		g.Light.hentikanKedip()
 	})
@@ -143,10 +171,21 @@ type Barrier struct {
 	dev   *Device
 	cfg   GateConfig
 	under *Loop
+
+	// niat menyimpan posisi palang yang dikehendaki lapisan atas, untuk ditegaskan
+	// ulang setelah koneksi pulih (task 3.3). Dicatat SEBELUM perintah dikirim: yang
+	// perlu diingat adalah kehendaknya, bukan berhasil-tidaknya pengiriman.
+	niat            niat
+	maxUsiaNiatBuka time.Duration
+
+	// tutupYatim menyalakan penutupan palang yang ditinggalkan proses sebelumnya.
+	tutupYatim bool
 }
 
 // Open menaikkan palang.
 func (b *Barrier) Open(ctx context.Context) error {
+	b.niat.simpan(niatBuka)
+
 	var (
 		cmd string
 		err error
@@ -179,6 +218,10 @@ func (b *Barrier) Close(ctx context.Context) error {
 	if b.cfg.BarrierMode == BarrierPulse {
 		return nil
 	}
+	// Niat dicatat walau interlock menolak: yang dikehendaki lapisan atas tetap
+	// "tertutup", dan rekonsiliasi nanti memeriksa ulang syaratnya sendiri.
+	b.niat.simpan(niatTutup)
+
 	if err := b.periksaInterlock(); err != nil {
 		return err
 	}
@@ -195,7 +238,13 @@ func (b *Barrier) Close(ctx context.Context) error {
 // Bila loop bawah belum pernah terbaca stabil (misalnya tepat setelah reconnect),
 // penutupan TIDAK diblokir. Memblokir tanpa dasar akan membuat palang menggantung
 // terbuka setiap kali koneksi pulih, dan palang yang tak pernah menutup adalah
-// kegagalan operasional tersendiri. Rekonstruksi status lewat STAT adalah task 3.2.
+// kegagalan operasional tersendiri.
+//
+// Resync STAT (task 3.2) mempersempit jendela "belum diketahui" itu menjadi satu kali
+// perjalanan perintah setelah koneksi terbentuk, tetapi TIDAK menghapusnya: resync bisa
+// gagal, dan controller yang belum patuh §5.5 tak akan pernah mengisinya. Jadi jangan
+// mengubah cabang ini menjadi "blokir bila tak diketahui" dengan anggapan 3.2 selalu
+// berhasil — anggapan itu tidak dijamin.
 func (b *Barrier) periksaInterlock() error {
 	if high, diketahui := b.under.dev.LoopState(b.under.ch); diketahui && high {
 		return hw.ErrSafetyInterlock
@@ -297,6 +346,11 @@ type Light struct {
 	mu            sync.Mutex
 	batalkanKedip context.CancelFunc
 	kedipWG       sync.WaitGroup
+
+	// Pola statis terakhir, untuk ditegaskan ulang setelah reconnect (task 3.3).
+	// Pola berkedip tak dicatat — pengedipnya sudah menyembuhkan diri tiap 500 ms.
+	polaStatis      hw.LightPattern
+	punyaPolaStatis bool
 }
 
 // Set menerapkan pola lampu.
@@ -307,13 +361,11 @@ func (l *Light) Set(ctx context.Context, p hw.LightPattern) error {
 	l.hentikanKedip()
 
 	switch p {
-	case hw.PatternOff:
-		return l.setel(ctx, false, false)
-	case hw.PatternGreen:
-		return l.setel(ctx, true, false)
-	case hw.PatternRed:
-		return l.setel(ctx, false, true)
+	case hw.PatternOff, hw.PatternGreen, hw.PatternRed:
+		l.ingatPolaStatis(p)
+		return l.setel(ctx, p == hw.PatternGreen, p == hw.PatternRed)
 	case hw.PatternRedBlink:
+		l.lupakanPolaStatis()
 		if err := l.setel(ctx, false, true); err != nil {
 			return err
 		}
@@ -324,6 +376,20 @@ func (l *Light) Set(ctx context.Context, p hw.LightPattern) error {
 	default:
 		return fmt.Errorf("tcpctl: pola lampu %d tidak dikenal", p)
 	}
+}
+
+// ingatPolaStatis mencatat pola yang perlu ditegaskan ulang setelah reconnect.
+func (l *Light) ingatPolaStatis(p hw.LightPattern) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.polaStatis, l.punyaPolaStatis = p, true
+}
+
+// lupakanPolaStatis dipanggil saat pola berkedip mengambil alih kanal.
+func (l *Light) lupakanPolaStatis() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.punyaPolaStatis = false
 }
 
 // setel menyalakan/mematikan kedua lampu sesuai kehendak.

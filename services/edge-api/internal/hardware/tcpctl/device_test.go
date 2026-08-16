@@ -17,8 +17,19 @@ func backoffUji() Backoff {
 // opsiDasarUji: backoff cepat, dan keepalive aplikasi dimatikan supaya tes siklus
 // koneksi (task 1.2) tidak tercampur PING otomatis. Tes keepalive sendiri ada di
 // keepalive_test.go dan menyalakannya kembali secara eksplisit.
+// opsiDasarUji mematikan seluruh lalu lintas latar yang dikirim Device atas
+// inisiatifnya sendiri — keepalive PING dan resync STAT (task 3.2). Keduanya menyalakan
+// perintah yang tak diminta oleh uji, sehingga akan mengacaukan hitungan Exec dan
+// menyuntikkan LoopEvent dari potret STAT bawaan controllerPalsu (STAT10001000).
+//
+// Resync punya uji tersendiri: TestSeed* di resync_test.go dan TestIntegrasiResync*
+// terhadap simdev.
 func opsiDasarUji() []DeviceOption {
-	return []DeviceOption{WithReconnectBackoff(backoffUji()), WithPingInterval(0)}
+	return []DeviceOption{
+		WithReconnectBackoff(backoffUji()),
+		WithPingInterval(0),
+		WithStatResync(false),
+	}
 }
 
 func mulaiDevice(t *testing.T, addr string, opts ...DeviceOption) *Device {

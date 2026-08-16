@@ -27,6 +27,17 @@ func getJSON(t *testing.T, app *fiber.App, path string) map[string]any {
 	return m
 }
 
+// getStatus menjalankan GET dan mengembalikan kode statusnya saja.
+func getStatus(t *testing.T, app *fiber.App, path string) int {
+	t.Helper()
+	req, _ := http.NewRequest("GET", path, nil)
+	resp, err := app.Test(req, 2000)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	return resp.StatusCode
+}
+
 // statusPost menjalankan POST dan mengembalikan kode statusnya saja.
 func statusPost(t *testing.T, app *fiber.App, path, body string) int {
 	t.Helper()
@@ -151,5 +162,65 @@ func TestEndpointLamaMasihBerfungsi(t *testing.T) {
 	d := getJSON(t, app, "/api/v1/devices")
 	if gates, ok := d["gates"].([]any); !ok || len(gates) != 2 {
 		t.Fatalf("/api/v1/devices = %v", d["gates"])
+	}
+}
+
+// Endpoint kesehatan per gerbang (task 3.4).
+func TestEndpointKesehatanPerGerbang(t *testing.T) {
+	app, _ := testApp(t)
+
+	h := getJSON(t, app, "/api/v1/gates/GATE-IN-01/health")
+	if h["gate_code"] != "GATE-IN-01" {
+		t.Fatalf("gate_code = %v", h["gate_code"])
+	}
+	if h["status"] != "ok" {
+		t.Fatalf("gerbang simulator sehat: status = %v (%v)", h["status"], h)
+	}
+	if h["menjawab"] != true {
+		t.Fatalf("gerbang harus menjawab: %v", h)
+	}
+	if h["state"] == nil {
+		t.Fatalf("kesehatan tanpa state: %v", h)
+	}
+
+	if got := getStatus(t, app, "/api/v1/gates/GATE-HANTU/health"); got != 404 {
+		t.Fatalf("gerbang tak dikenal: status = %d, want 404", got)
+	}
+}
+
+// Health lahan menyertakan kesehatan tiap gerbang + rollup terpisah.
+//
+// `status` tetap soal proses edge-api; kesehatan lahan dibaca dari `gates_status`.
+// Menggabungkan keduanya membuat pemantau me-restart edge-api saat satu controller
+// tercabut — yang justru menjatuhkan gerbang lain yang masih sehat (P8).
+func TestHealthMenyertakanKesehatanGerbang(t *testing.T) {
+	app, _ := testApp(t)
+
+	m := getJSON(t, app, "/api/v1/health")
+	if m["status"] != "ok" {
+		t.Fatalf("status proses = %v, want ok", m["status"])
+	}
+	if m["gates_status"] != "ok" {
+		t.Fatalf("gates_status = %v, want ok", m["gates_status"])
+	}
+
+	gates, ok := m["gates"].(map[string]any)
+	if !ok {
+		t.Fatalf("gates = %v", m["gates"])
+	}
+	g, ada := gates["GATE-IN-01"].(map[string]any)
+	if !ada {
+		t.Fatalf("health tak memuat GATE-IN-01: %v", gates)
+	}
+	// Kontrak lama harus tetap utuh — dashboard yang ada membacanya.
+	if g["state"] == nil || g["kind"] == nil {
+		t.Fatalf("kontrak lama state/kind hilang: %v", g)
+	}
+	kes, ok := g["health"].(map[string]any)
+	if !ok {
+		t.Fatalf("gerbang tanpa health: %v", g)
+	}
+	if kes["status"] != "ok" || kes["gate_code"] != "GATE-IN-01" {
+		t.Fatalf("health gerbang = %v", kes)
 	}
 }

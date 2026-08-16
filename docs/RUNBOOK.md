@@ -75,6 +75,106 @@ psql "$EDGE_DATABASE_URL" -f db/grants.sql   # append-only audit_logs
 
 ---
 
+## 3b. Deploy Edge sebagai service (task 3.1)
+
+Edge adalah titik kritis lahan — "boleh mati? tidak, gerbang berhenti" (PRD §4.2). Menjalankannya
+dari terminal berarti lahan berhenti melayani begitu sesi ditutup atau mesin reboot.
+
+Ada **dua** mode kegagalan yang harus ditutup, dan keduanya berbeda:
+
+| Kegagalan | Gejala | Yang menutupnya |
+|---|---|---|
+| Proses **mati** | hilang dari daftar proses | `Restart=always` (systemd) · `AppExit Default Restart` (NSSM) |
+| Proses **membeku** | masih "Running", tak menjawab apa pun | Watchdog — `WatchdogSec` (systemd) · Scheduled Task (Windows) |
+
+Menutup yang pertama saja adalah kesalahan yang paling sering terjadi: proses beku terbaca
+"active (running)" selamanya, gerbang berhenti melayani, dan tak satu pun alarm berbunyi.
+
+### Linux (systemd)
+
+```bash
+sudo useradd --system --home /var/lib/parkir --shell /usr/sbin/nologin parkir
+sudo mkdir -p /var/lib/parkir /var/log/parkir /etc/parkir
+sudo chown parkir:parkir /var/lib/parkir /var/log/parkir
+
+cd services/edge-api && go build -o edge-api ./cmd/edge-api
+sudo install -m 0755 edge-api /usr/local/bin/edge-api
+
+sudo cp deploy/systemd/edge-api.service /etc/systemd/system/
+sudo cp deploy/systemd/edge-api.env     /etc/parkir/edge-api.env
+sudo chmod 600 /etc/parkir/edge-api.env
+sudo nano /etc/parkir/edge-api.env      # WAJIB: NODE_ID, TENANT_CODE, SITE_CODE, JWT_ACCESS_SECRET
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now edge-api
+systemctl status edge-api
+journalctl -u edge-api -f
+```
+
+Unit-nya `Type=notify`: systemd menunggu edge-api mengirim `READY=1` — yang baru dikirim setelah
+gerbang dirangkai **dan** port HTTP benar-benar terikat. Unit dependen karenanya tak pernah
+dinyalakan untuk Edge yang sebenarnya belum melayani.
+
+Verifikasi watchdog benar-benar aktif:
+
+```bash
+systemctl show edge-api -p WatchdogUSec -p NRestarts
+```
+
+### Windows (Service Control Manager + NSSM)
+
+```powershell
+# 1. Service, dengan restart otomatis
+.\deploy\windows\install-edge-api-service.ps1 `
+    -BinaryPath C:\parkir\edge-api.exe -EnvFile C:\parkir\edge-api.env
+
+# 2. Watchdog eksternal — JANGAN dilewati
+$a = New-ScheduledTaskAction -Execute "powershell.exe" `
+       -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\parkir\watchdog-edge-api.ps1"
+$t = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+       -RepetitionInterval (New-TimeSpan -Minutes 1)
+$p = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "edge-api-watchdog" -Action $a -Trigger $t -Principal $p
+```
+
+Windows tak punya padanan `sd_notify`/`WatchdogSec`, jadi NSSM **hanya** menutup kegagalan jenis
+pertama. Tanpa Scheduled Task di atas, edge-api yang membeku tak akan pernah dinyalakan ulang.
+
+### Yang watchdog SENGAJA tidak lakukan
+
+Watchdog — di kedua platform — tidak pernah menyalakan ulang edge-api karena sebuah **gerbang**
+tidak sehat. Controller yang tercabut membuat gerbang itu `down` di `/api/v1/health`, dan itu memang
+benar; tetapi restart tak menyambungkan kabel, sementara ia **menjatuhkan gerbang lain di lahan yang
+masih melayani** (P8). Yang diuji hanya satu: apakah prosesnya masih menjawab. Lihat K26 & K33 di
+[`CATATAN_KEPUTUSAN.md`](CATATAN_KEPUTUSAN.md).
+
+---
+
+### Mengukur waktu pemulihan (NFR-2.3)
+
+```bash
+./deploy/ukur-pemulihan.sh 5
+```
+
+Mengukur siklus penuh yang dialami lahan: `SIGTERM` → berhenti bersih → jeda `RestartSec` →
+proses baru → `READY=1`. Garis akhirnya `READY=1`, bukan "proses ada di daftar proses", karena
+pesan itu baru dikirim setelah gerbang dirangkai **dan** port HTTP terikat.
+
+Terakhir diukur: **2,01 dtk** terburuk dari 5 putaran (batas 15 dtk), didominasi jeda
+`RestartSec=2s`.
+
+> **`READY=1` tidak menunggu controller tersambung, dan itu disengaja.** Lahan dengan satu
+> controller mati harus tetap naik dan melayani gerbang lainnya (P8); menahan "siap" sampai
+> semua controller menyambung berarti satu kabel tercabut menahan seluruh lahan. Status
+> controller dibaca terpisah dari `/api/v1/health`.
+
+> **Yang pulih adalah LAYANAN, bukan DATA.** Selama `edge-api` memakai `memstore`, restart
+> menghapus seluruh kendaraan yang berada di dalam lahan — kendaraan yang masuk sebelum
+> restart tak akan dikenali saat keluar. Persistensi adalah task 5.1 (terblokir Docker).
+> Lihat K35 di [`CATATAN_KEPUTUSAN.md`](CATATAN_KEPUTUSAN.md).
+
+---
+
 ## 4. Health & observability
 
 - `GET /api/v1/health` (Edge): state gerbang, `sync.pending`, `chain.verified`, `ocr.count`.
@@ -94,6 +194,8 @@ psql "$EDGE_DATABASE_URL" -f db/grants.sql   # append-only audit_logs
 | Palang tak menutup | loop bawah HIGH (interlock P4) | benar secara desain; tunggu loop LOW / cek kendaraan |
 | Kertas habis | printer PAPER_OUT | casual berhenti (LOCKED_NO_PAPER); **member tetap bisa masuk** (D3) |
 | Gerbang `UNRESPONSIVE` di health | controller hang: socket hidup tapi `PING` tak dibalas 3× | driver memutus paksa & menyambung ulang sendiri; bila berulang, cek daya/firmware controller |
+| Service "active" tapi tak menjawab | proses membeku | watchdog seharusnya menangkapnya — cek `systemctl show edge-api -p WatchdogUSec` (0 = tak aktif) atau Scheduled Task di Windows |
+| Service gagal start berulang | port dipakai, config kurang, izin | `journalctl -u edge-api -n 50`; edge-api keluar dengan status bukan-nol dan menyebut alasannya |
 | Gerbang `DISCONNECTED` menetap | kabel LAN / IP-port salah / controller mati | cek `gates.endpoint`; driver terus mencoba dengan backoff (maks 15 dtk), tak perlu restart edge-api |
 | Perintah palang ditolak `controller sedang terputus` | benar secara desain | perintah **tidak** diantre — kirim ulang setelah gerbang ONLINE (mencegah palang menutup terlambat di atas kendaraan) |
 | Loop "berkedip" tapi state machine diam | pantulan kontak < 150 ms | benar secara desain (debounce §6.1); bila kendaraan nyata tak terdeteksi, kalibrasi loop detector di sisi lapangan |

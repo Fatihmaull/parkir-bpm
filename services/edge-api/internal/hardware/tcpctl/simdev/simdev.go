@@ -145,6 +145,15 @@ func (s *Device) Output(ch int) bool {
 	return s.outputs[ch-1]
 }
 
+// SetOutput memaksa posisi relay dari luar, tanpa perintah dari Edge.
+//
+// Ini meniru controller yang kehilangan keadaan relay-nya — reboot, catu daya berkedip,
+// atau firmware yang mengembalikan output ke nol saat koneksi putus. Kegagalan itu tak
+// terlihat dari sisi Edge: tak ada event yang memberitahukannya, dan Edge akan terus
+// mengira palang berada di posisi yang terakhir ia perintahkan. Justru karena itulah
+// rekonsiliasi (task 3.3) ada, dan tanpa kemampuan ini ia tak dapat diuji sama sekali.
+func (s *Device) SetOutput(ch int, nyala bool) { s.setOutput(ch, nyala) }
+
 // Input melaporkan posisi kanal input.
 func (s *Device) Input(ch int) bool {
 	if ch < 1 || ch > kanalMax {

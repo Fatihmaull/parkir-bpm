@@ -466,6 +466,118 @@ Tiga jalan keluar ditambahkan:
 
 ---
 
+## 7e. Persistensi pgx — task 5.1–5.4 (K39–K45)
+
+### K39 — tenant_id/site_id diikat SEKALI di konstruksi `pgstore.New`, bukan per-panggilan
+`gate.Store`/`gate.ExitStore`/dst. tak punya parameter tenant_id sama sekali — kontraknya
+identik dengan memstore (task 5.1 menuntut ini). Enforcement §12.14 karenanya tak bisa lewat
+tanda tangan metode; ia lewat konstruksi: `pgstore.New` meresolusi `TENANT_CODE`/`SITE_CODE`
+jadi UUID sekali di awal, dan SETIAP query yang ditulis di paket ini memakai nilai yang sama.
+
+**Harga:** satu proses `pgstore.Store` hanya bisa melayani SATU tenant+site — cocok dengan
+realitas fisik (Edge = satu PC per lahan), tapi berarti repository ini secara sengaja tak bisa
+dipakai ulang untuk skenario multi-tenant-per-proses (itu memang peran Cloud, bukan Edge).
+
+### K40 — `audit.Chain` dipecah jadi `Next` (hitung, tak memajukan) + `Commit` (majukan setelah
+tersimpan) ⚠️
+`memstore.Store.Record` aman memakai `Chain.Append` (hitung+majukan sekaligus) karena
+penyimpanannya in-memory — tak pernah "gagal tersimpan". `pgstore.Store.Record` bisa gagal di
+tengah (pool putus, dll). Kalau chain sudah dimajukan SEBELUM baris benar-benar ter-INSERT,
+kegagalan meninggalkan celah seq permanen di DB — `VerifyChain` berikutnya melaporkan "rusak"
+untuk transaksi yang sebenarnya cuma gagal, bukan dimanipulasi (P5: negatif-palsu di jalur
+anti-fraud sama buruknya dengan negatif-palsu di interlock keselamatan).
+
+Urutan yang benar: `Next` (hitung entri, TAK mengubah state) → INSERT → `Commit` (majukan
+state) HANYA setelah INSERT terbukti sukses. `Next` boleh dipanggil berulang tanpa `Commit` di
+antaranya (retry aman, menghasilkan entri identik). `Chain.Append` dipertahankan sebagai
+`Next`+`Commit` sekaligus — perilaku memstore tak berubah sedikit pun.
+
+**Harga:** kalau proses mati TEPAT di antara INSERT sukses dan `Commit` (jendela sangat
+sempit), percobaan `Record` berikutnya akan membentur `UNIQUE(node_id, seq)` di DB dan gagal
+keras. Diterima dengan sengaja — lebih baik satu event audit gagal tercatat dengan jelas
+(alert, log) daripada rantai diam-diam bercabang dua current_hash untuk seq yang sama.
+
+### K41 — `created_at` dipotong ke presisi MIKROdetik sebelum dihash ⚠️ (ditemukan lewat uji nyata)
+Formula hash (`chain.go`) memasukkan `created_at.Format(RFC3339Nano)` — presisi NANOdetik ala
+Go. `timestamptz` PostgreSQL hanya menyimpan presisi mikrodetik. Akibatnya: hash dihitung saat
+`Record` memakai timestamp presisi-nano, tapi saat baris yang sama dibaca balik dari DB untuk
+`VerifyChain`, timestamp-nya sudah terpotong — `computeHash` ulang menghasilkan hash BEDA dari
+yang tersimpan, dan `VerifyChain` melaporkan rantai rusak pada baca-ulang PERTAMA, walau tak
+ada satu byte pun yang dimanipulasi siapa pun.
+
+Ini TIDAK ditemukan lewat `go vet`/unit test (memstore tak pernah menulis-lalu-baca-ulang lewat
+media dengan presisi berbeda) — ketahuan hanya karena uji integrasi dijalankan terhadap
+PostgreSQL 16 sungguhan (lihat K43) dan `TestAuditChainSurvivesRestart` gagal telak. **Inilah
+persis alasan chaos test/uji integrasi ada** (bandingkan K38): uji unit memeriksa jalan yang
+kita bayangkan, uji terhadap sistem nyata memeriksa yang tak kita bayangkan sama sekali.
+
+Perbaikan: `pgstore.Record` memotong `e.CreatedAt` ke `time.Microsecond` SEBELUM memanggil
+`chain.Next` — hash yang dihitung sekarang PASTI sama dengan yang akan dihitung ulang dari
+representasi yang benar-benar tersimpan. `audit.Chain` sendiri tak diubah (ia tetap DB-agnostic
+by design); pemotongan ini murni tanggung jawab lapisan repository yang tahu presisi medianya.
+
+### K42 — `Settle`/`Fail` di pgstore menyimpan rincian PENUH — sengaja BUKAN "parity" dengan memstore
+`memstore.Settle`/`Fail` membuang seluruh `SettleInfo` (tendered, change, approval code, masked
+PAN, dst.) — cuma mengubah status. Ini bukan kontrak yang harus ditiru persis, ini keterbatasan
+in-memory (tak ada tempat menyimpannya di luar umur proses). Kolom-kolom itu ADA di skema
+`payments` justru untuk ini (§6.2.1 masked PAN). `pgstore` menuliskannya penuh.
+
+**Harga:** perilaku pgstore dan memstore kini beda secara OBSERVABLE untuk `PaymentViews`/dsb.
+walau tanda tangan metodenya identik ("interface identik" task 5.1 berlaku untuk KONTRAK, bukan
+untuk sejauh mana implementasi memory yang disederhanakan boleh menyembunyikan data). Membuang
+data yang jelas-jelas diminta ditulis skema demi "konsistensi" dengan stub demo akan jadi
+regresi diam-diam dari maksud PRD, bukan kepatuhan yang sah.
+
+### K43 — `AuditEntries`/`VerifyChain` pgstore scan PENUH, sengaja TAK di-windowed
+`/api/v1/health` memanggil `AuditEntries()` tiap request (dipoll monitoring). Godaan pertama:
+batasi ke N baris terbaru (`ORDER BY seq DESC LIMIT n`) demi kecepatan. Ditolak: `audit.Verify`
+menuntut rantai dimulai dari genesis (seq 1, `previous_hash` = `GenesisHash`) — jendela yang
+dipotong TIDAK dimulai dari sana, jadi `Verify` akan SELALU melaporkan "rusak" di entri
+pertama jendela (false positive terus-menerus), atau — kalau baseline-nya sekadar "dipercaya"
+tanpa diverifikasi balik ke DB — celah verifikasi diam-diam (tampering di luar jendela tak
+pernah terdeteksi). Dua-duanya lebih buruk daripada query yang lambat.
+
+**Harga:** untuk lahan berumur sangat panjang, `/api/v1/health` bisa jadi query yang tumbuh
+mahal. Diterima sebagai isu skala TERBUKA (bukan TODO tersembunyi di kode) — perbaikan yang
+benar adalah verifikasi berbasis checkpoint (baseline seq+hash tersimpan terpisah), bukan
+`LIMIT` polos. Dicatat di sini justru supaya siapa pun yang tergoda menambah `LIMIT` nanti
+membaca alasan ini dulu.
+
+### K44 — Sandbox pengerjaan session ini ternyata punya PostgreSQL 16 terpasang TANPA Docker
+Asumsi awal (lihat riwayat sesi/PR sebelumnya): Epik 5 tertahan karena laptop developer tak
+kuat menjalankan Docker. Ternyata sandbox tempat task 5.1–5.4 dikerjakan sudah punya paket
+`postgresql-16` (server, bukan cuma `psql` client) terpasang lewat apt. Karena itu, task 5.1
+ditest **ujung-ke-ujung terhadap Postgres sungguhan** — bukan cuma `go vet`/mock — termasuk
+menjalankan biner `edge-api` penuh (`EDGE_STORE=postgres`) dan menggerakkan kendaraan lewat
+gerbang simulator sampai baris `vehicles_log`/`audit_logs`/`sync_outbox` benar-benar tersimpan.
+
+**Implikasi untuk developer lain:** kalau laptop dev tak kuat Docker, `apt install postgresql`
+(paket server, bukan `postgresql-client` saja) adalah alternatif yang jauh lebih ringan untuk
+Postgres LOKAL — tanpa image, tanpa container, layanan systemd biasa. Tak menggantikan Neon
+untuk sesi kerja yang memang tanpa akses shell lokal (mis. sesi cloud dengan kebijakan
+jaringan ketat, lihat catatan MCP Neon), tapi untuk sandbox/CI yang punya apt, ini pilihan
+paling murah.
+
+### K45 — CI mendapat Postgres lewat service container GitHub Actions, bukan Docker developer
+`ci.yml` job `edge-api` sekarang punya `services: postgres:16` — Postgres milik RUNNER GitHub,
+efemeral per run, dipakai untuk menjalankan migrasi goose (task 5.2) sungguhan lalu
+`go test -tags=integration ./internal/pgstore/...`. Ini BUKAN Docker di mesin siapa pun —
+developer tetap cukup `go build`/`go test` biasa (mode memory) di laptopnya; hanya CI yang
+butuh Postgres, dan CI sudah presedennya menjalankan Docker untuk publish image (13.1).
+
+**Harga:** uji integrasi pgstore TIDAK ikut jalan di `go test ./...` polos (perlu
+`-tags=integration` eksplisit) — developer yang cuma jalan `go test` biasa tak akan melihat
+kelas bug seperti K41 sampai push ke CI atau jalankan tag itu secara sadar terhadap Postgres
+lokal/dev. Diterima: memaksa integration test selalu jalan di `go test` polos berarti SETIAP
+developer mode-memory kudu punya Postgres tersambung, melanggar semangat D12 (mode memory ada
+supaya edge-api bisa dikerjakan tanpa DB).
+
+*Sumber: `internal/pgstore/`, `internal/gatesvc/store.go`, `internal/audit/chain.go`
+(`Next`/`Commit`), `internal/outbox/pg.go`, `db/migrations/00006_ticket_sequence.sql`,
+`db/seed/dev_seed.sql`, `.github/workflows/ci.yml`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -494,9 +606,13 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 ### Utang teknis yang diketahui
 
-- **Tak ada lapisan basis data di `edge-api`.** Tak ada pgx di `go.mod`; `config.Store` menyebut
-  `memory|postgres` tapi hanya `memory` yang jalan. Memblokir Epik 5 (kecuali 5.5) dan bagian "muat
-  gerbang dari DB" pada task 2.1. `gatesvc.GateSource` adalah tempat sambungnya.
+- ~~Tak ada lapisan basis data di `edge-api`~~ **SELESAI task 5.1–5.4** — `internal/pgstore`
+  menggantikan `memstore` lewat `EDGE_STORE=postgres`, diuji terhadap Postgres 16 sungguhan
+  (K39–K45). Yang MASIH belum tersambung ke DB: "muat daftar gerbang dari tabel `gates`" pada
+  task 2.1 — `gatesvc.GateSource` masih baca dari `.env`/config statis, bukan query DB, walau
+  tabelnya sudah ada & terisi lewat seed (K44). Itu task terpisah, bukan bagian 5.1–5.4.
+- **`AuditEntries`/`VerifyChain` pgstore scan penuh tanpa jendela** (K43) — isu skala terbuka
+  untuk lahan berumur sangat panjang, bukan bug, tapi juga bukan sudah "selesai selamanya".
 - **Printer tiket belum punya adapter konkret** (H1). Gerbang masuk nyata memakai printer
   tersimulasi, diumumkan lewat `Runner.Disimulasikan()`, `/api/v1/gates`, dan status kesehatan
   `degraded` (K26) — perangkat palsu di jalur produksi tidak pernah tersamar sebagai sungguhan (P3).
@@ -509,6 +625,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-16 | K39–K45 ditambahkan (task 5.1–5.4 — repository pgx, diuji terhadap Postgres 16 sungguhan tanpa Docker). Utang teknis "tak ada lapisan basis data" ditandai selesai. |
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
 | 2026-08-13 | K38 ditambahkan (task 3.6 — chaos test menemukan LOCKED_NO_PAPER buntu). |
 | 2026-08-13 | K35–K37 ditambahkan (task 3.5 — pemulihan, palang yatim, urutan perangkaian). |

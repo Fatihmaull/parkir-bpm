@@ -16,6 +16,26 @@ jobs:
     defaults:
       run:
         working-directory: services/edge-api
+    # postgres:16 di sini adalah Postgres milik RUNNER GitHub, bukan Docker di mesin dev
+    # siapa pun (task 5.1/5.2) — dipakai HANYA untuk memvalidasi migrasi goose & menjalankan
+    # uji integrasi pgstore (build tag "integration"), efemeral per run. Bukan pengganti
+    # Neon/Postgres dev sungguhan yang dipakai manual di luar CI.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: parkir
+          POSTGRES_PASSWORD: parkir
+          POSTGRES_DB: parkir_edge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U parkir"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      EDGE_DATABASE_URL: postgres://parkir:parkir@localhost:5432/parkir_edge?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -27,6 +47,12 @@ jobs:
         run: go vet ./...
       - name: Test (race + coverage)
         run: go test -race -coverprofile=coverage.out ./...
+      - name: Install goose
+        run: go install github.com/pressly/goose/v3/cmd/goose@v3.27.3
+      - name: Terapkan migrasi ke Postgres CI (task 5.2 — validasi terhadap Postgres nyata)
+        run: goose -dir ../../db/migrations postgres "$EDGE_DATABASE_URL" up
+      - name: Test integrasi pgstore (task 5.1, terhadap Postgres nyata)
+        run: go test -tags=integration ./internal/pgstore/...
       - name: Build
         run: go build ./...
 

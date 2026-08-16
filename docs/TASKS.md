@@ -82,12 +82,36 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ⬜ 4.3 Integrasi scanner QR/barcode di POS keluar (USB-HID wedge / serial) (H4).
 - ✅ 4.4 Abstraksi `TicketPrinter` + degradasi (v2).
 
-## EPIK 5 — Persistensi & Repository pgx (Dev A) — *tertahan Docker*
-- ⬜ 5.1 Repository pgx menggantikan `memstore` (interface identik) — vehicles_log, payments, memberships,
-  ocr_logs, audit_logs, outbox, gates/devices.
-- ⬜ 5.2 Validasi migrasi goose terhadap PostgreSQL nyata + `grants.sql`.
-- ⬜ 5.3 Enforcement `tenant_id` + `site_id` di lapisan repository (§12.14).
-- ⬜ 5.4 Seed & fixtures multi-lahan/multi-gerbang.
+## EPIK 5 — Persistensi & Repository pgx (Dev A) — ✅ TUNTAS
+Ternyata TAK butuh Docker sama sekali — sandbox pengerjaan ini sudah punya paket
+`postgresql-16` terpasang (server, bukan cuma client), jadi seluruh task di bawah diuji
+terhadap Postgres SUNGGUHAN secara lokal, bukan cuma `go vet`. Lihat CATATAN_KEPUTUSAN.md K41.
+- ✅ 5.1 Repository pgx (`internal/pgstore`) menggantikan `memstore` lewat kontrak identik
+  (`gatesvc.Store`, interface baru yang disatukan) — vehicles_log, payments, memberships,
+  tariffs, ocr_logs, audit_logs (rantai hash persisten lintas restart), outbox (transaksional,
+  tabel `sync_outbox`), ticket_counters (penomoran tiket atomik per site, migrasi baru 00006).
+  Diuji ujung-ke-ujung: biner `edge-api` sungguhan + `EDGE_STORE=postgres` + gerbang simulator,
+  kendaraan lewat GATE-IN-01 sampai `vehicles_log` COMMITTED, `audit_logs` bertaut hash benar,
+  `sync_outbox` terisi transaksional. 2 bug nyata ditemukan & diperbaiki lewat uji integrasi
+  (bukan dugaan): (1) `flags` nil di `Complete` membentur NOT NULL constraint — memstore tak
+  pernah menyentuh ini karena map Go menerima nil slice tanpa keluhan; (2) hash rantai audit
+  dihitung dari `created_at` presisi nanodetik tapi Postgres `timestamptz` hanya presisi
+  mikrodetik → `VerifyChain` SELALU melaporkan rantai rusak pada baca-ulang pertama walau tak
+  ada yang dimanipulasi, sampai `created_at` dipotong ke mikrodetik SEBELUM dihash.
+- ✅ 5.2 Migrasi goose (termasuk 00006 baru) + `db/grants.sql` divalidasi terhadap Postgres 16
+  sungguhan — `REVOKE UPDATE/DELETE/TRUNCATE` teruji langsung menolak `app_user` (privilege,
+  bukan cuma trigger). CI (`ci.yml`) sekarang menjalankan migrasi + `go test -tags=integration`
+  terhadap `postgres:16` sebagai service container GitHub Actions per run — efemeral, tanpa
+  Docker di mesin developer mana pun.
+- ✅ 5.3 Enforcement `tenant_id`/`site_id` (§12.14) — diikat SEKALI saat `pgstore.New` (dari
+  `TENANT_CODE`/`SITE_CODE`, di-resolve ke UUID), dipakai di SETIAP query yang ditulis di
+  repository, bukan diterima per-panggilan. Realitas fisik "Edge = satu proses per lahan"
+  membuat pengikatan di konstruksi ini mustahil dilewatkan, dibanding mempercayai tiap
+  pemanggil mengirim tenant_id benar tiap kali.
+- ✅ 5.4 Seed dev multi-lahan/multi-gerbang — `db/seed/dev_seed.sql` (`make seed`): 2 tenant
+  (satu dengan 2 site, untuk uji isolasi antar-site DALAM satu tenant — kasus paling gampang
+  bocor), site pertama dapat 2 gerbang masuk + 1 keluar. Idempoten (`ON CONFLICT DO NOTHING`),
+  diuji dijalankan dua kali berturut-turut.
 - ✅ 5.5 Skema DDL + memstore in-memory (v2).
 
 ## EPIK 6 — LPR / OCR (Dev A)

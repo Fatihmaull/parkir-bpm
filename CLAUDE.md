@@ -45,15 +45,21 @@ implementasi itu yang salah.**
 | Papan kerja | Notion Backlog (utama) · `docs/TASKS.md` (cermin di repo) | — |
 | Tipe bersama | `packages/types/` | `tsc --noEmit` |
 
-Perintah umum tersedia di `Makefile` (`make db-up`, `make migrate`, `make test`).
+Perintah umum tersedia di `Makefile` (`make db-up`, `make migrate`, `make seed`, `make test`).
+`db-up` cuma satu opsi (docker compose) — Postgres lokal via `apt install postgresql` atau
+cloud dev (mis. Neon) sama-sama cukup, `migrate`/`grants`/`seed` cuma butuh `EDGE_DATABASE_URL`.
 
-## Kondisi implementasi saat ini (per 2026-08-13)
+## Kondisi implementasi saat ini (per 2026-08-16)
 
 Baca ini sebelum merencanakan pekerjaan — beberapa hal yang tampak "tinggal dipakai" belum ada.
 
-- **Tidak ada lapisan basis data di `edge-api`.** Tak ada pgx di `go.mod`; `config.Store` menyebut
-  `memory|postgres` tapi hanya `memory` (`internal/memstore`) yang jalan. Ini memblokir Epik 5
-  (kecuali 5.5) dan bagian "muat gerbang dari DB" pada task 2.1.
+- **Lapisan basis data `edge-api` SUDAH ada** (task 5.1–5.4, lihat CATATAN_KEPUTUSAN.md K39–K45).
+  `internal/pgstore` mengimplementasikan `gatesvc.Store` yang sama persis dengan `memstore`;
+  `EDGE_STORE=postgres` mengaktifkannya, `EDGE_STORE=memory` (bawaan) tetap jalan tanpa DB (D12).
+  Diuji terhadap PostgreSQL 16 sungguhan ujung-ke-ujung, TANPA Docker (paket `postgresql`
+  server via apt sudah cukup untuk dev lokal; CI dapat Postgres lewat service container
+  GitHub Actions). Yang MASIH belum: "muat daftar gerbang dari tabel `gates`" pada task 2.1
+  (`gatesvc.GateSource` masih baca `.env`, bukan query DB) — task terpisah dari 5.1–5.4.
 - **Driver A6/A9 (`tcpctl`) sudah tersambung ke jalur produksi** sejak task 2.6 — `gatesvc`
   merangkai `tcpctl.Gate` untuk gerbang bertransport `tcp`. Yang MASIH tersimulasi: printer di
   gerbang masuk (task 4.1 terblokir H1). Daftarnya terbuka di `gatesvc.Runner.Disimulasikan()`

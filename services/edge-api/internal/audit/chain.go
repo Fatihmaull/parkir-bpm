@@ -66,8 +66,22 @@ func NewChain(nodeID string, lastSeq int64, lastHash string) *Chain {
 	return &Chain{nodeID: nodeID, lastSeq: lastSeq, lastHash: lastHash}
 }
 
-// Append menghitung entri berikutnya (seq+1) dan memajukan state rantai.
+// Append menghitung entri berikutnya (seq+1) dan memajukan state rantai. Setara Next+Commit
+// sekaligus — cocok untuk memstore yang tak pernah gagal menyimpan (in-memory).
 func (c *Chain) Append(e Event) (Entry, error) {
+	entry, err := c.Next(e)
+	if err != nil {
+		return Entry{}, err
+	}
+	c.Commit(entry)
+	return entry, nil
+}
+
+// Next menghitung entri berikutnya TANPA memajukan state rantai (P5: append-only harus
+// pasti tersimpan sebelum dianggap terjadi). Dipakai repository pgx (task 5.1): hitung dulu,
+// INSERT ke audit_logs, baru Commit bila INSERT sukses. Kalau Next dipanggil lagi tanpa Commit
+// sebelumnya (mis. INSERT gagal), ia menghitung ulang seq yang sama — aman untuk dicoba lagi.
+func (c *Chain) Next(e Event) (Entry, error) {
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now()
 	}
@@ -76,16 +90,25 @@ func (c *Chain) Append(e Event) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	entry := Entry{
+	return Entry{
 		NodeID:       c.nodeID,
 		Seq:          seq,
 		Event:        e,
 		PreviousHash: c.lastHash,
 		CurrentHash:  h,
+	}, nil
+}
+
+// Commit memajukan state rantai setelah entry (dari Next) berhasil disimpan secara durable.
+// Panik bila entry bukan lanjutan langsung dari state saat ini — itu bug pemanggil (commit di
+// luar urutan), bukan sesuatu yang aman untuk "diperbaiki" diam-diam.
+func (c *Chain) Commit(entry Entry) {
+	if entry.NodeID != c.nodeID || entry.Seq != c.lastSeq+1 || entry.PreviousHash != c.lastHash {
+		panic(fmt.Sprintf("audit: Commit di luar urutan: entry seq=%d prev=%s, chain lastSeq=%d lastHash=%s",
+			entry.Seq, entry.PreviousHash, c.lastSeq, c.lastHash))
 	}
-	c.lastSeq = seq
-	c.lastHash = h
-	return entry, nil
+	c.lastSeq = entry.Seq
+	c.lastHash = entry.CurrentHash
 }
 
 // LastHash mengembalikan hash terakhir (untuk disimpan/di-sync ke Cloud).

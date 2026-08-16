@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
 	"github.com/jabar-creative/parkir/edge-api/internal/lpr"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
+	"github.com/jabar-creative/parkir/edge-api/internal/pgstore"
 	"github.com/jabar-creative/parkir/edge-api/internal/svcnotify"
 	"github.com/jabar-creative/parkir/edge-api/internal/syncagent"
 	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
@@ -62,13 +64,37 @@ func run() error {
 		"gate_in", cfg.GateIn.Transport, "gate_out", cfg.GateOut.Transport)
 
 	hub := wsbus.NewHub()
-	store := memstore.New(cfg.NodeID, time.Now)
-	// Seed tarif default agar fare engine berfungsi di mode demo.
-	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
-	store.SetRate("motor", gate.RateCard{BaseRate: 2000})
-	// Seed member demo (registrasi RFID §8.1).
-	store.AddMember("04A1B2C3", []string{"D1234ABC"}, "mobil", time.Now().AddDate(1, 0, 0))
-	store.AddMember("04D4E5F6", []string{"D5678XYZ"}, "motor", time.Now().AddDate(0, 6, 0))
+
+	// Repository (task 5.1): postgres (pgstore) menggantikan memory (memstore) lewat kontrak
+	// yang identik (gatesvc.Store) — tak ada logika gerbang yang berubah, hanya di mana
+	// datanya hidup. Seed tarif/member demo di bawah HANYA untuk mode memory (D12): mode
+	// postgres membaca data sungguhan dari tabel tariffs/memberships (task 5.2/5.4), bukan
+	// data karangan yang muncul lagi tiap restart.
+	var store gatesvc.Store
+	switch cfg.Store {
+	case "postgres":
+		pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("gagal membuat pool postgres: %w", err)
+		}
+		defer pool.Close()
+		pgs, err := pgstore.New(context.Background(), pool, cfg.TenantCode, cfg.SiteCode, cfg.NodeID)
+		if err != nil {
+			return fmt.Errorf("gagal menyiapkan repository postgres: %w", err)
+		}
+		store = pgs
+		slog.Info("repository: postgres", "tenant_code", cfg.TenantCode, "site_code", cfg.SiteCode)
+	default: // "memory" (D12) — juga default aman bila EDGE_STORE tak diset/salah eja
+		ms := memstore.New(cfg.NodeID, time.Now)
+		// Seed tarif default agar fare engine berfungsi di mode demo.
+		ms.SetRate("mobil", gate.RateCard{BaseRate: 5000})
+		ms.SetRate("motor", gate.RateCard{BaseRate: 2000})
+		// Seed member demo (registrasi RFID §8.1).
+		ms.AddMember("04A1B2C3", []string{"D1234ABC"}, "mobil", time.Now().AddDate(1, 0, 0))
+		ms.AddMember("04D4E5F6", []string{"D5678XYZ"}, "motor", time.Now().AddDate(0, 6, 0))
+		store = ms
+		slog.Info("repository: memory (demo/simulator, D12)")
+	}
 
 	// Recognizer: mode demo memakai Stub berlabel (BUKAN model nyata; YOLOv8/EasyOCR = Fase 2, §17).
 	// Produksi menyuntik klien gRPC ke lpr-svc via LPR_GRPC_ADDR.

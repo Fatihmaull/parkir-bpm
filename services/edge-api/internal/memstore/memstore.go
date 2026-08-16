@@ -81,8 +81,10 @@ func New(nodeID string, now func() time.Time) *Store {
 	}
 }
 
-// Outbox mengembalikan antrean sinkronisasi (untuk sync agent & /health).
-func (s *Store) Outbox() *outbox.Mem { return s.outbox }
+// Outbox mengembalikan antrean sinkronisasi (untuk sync agent & /health). Dikembalikan sebagai
+// interface outbox.Store (bukan *outbox.Mem konkret) supaya memstore.Store dan pgstore.Store
+// (task 5.1) punya tanda tangan metode yang identik — syarat keduanya memenuhi gatesvc.Store.
+func (s *Store) Outbox() outbox.Store { return s.outbox }
 
 // ── seed helpers (untuk demo/test) ──
 

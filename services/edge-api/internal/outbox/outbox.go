@@ -34,6 +34,7 @@ type Store interface {
 	FetchPending(limit int) []Item
 	MarkSent(ids []int64)
 	MarkFailed(id int64, errMsg string)
+	RequeueFailed() int // cron outbox_retry §8.3 — FAILED → PENDING lagi. Kembalikan jumlah.
 	PendingCount() int
 }
 

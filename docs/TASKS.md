@@ -9,11 +9,11 @@ Status: ✅ selesai · 🔧 sebagian · ⬜ belum · 🚧 terblokir.
 > tetap terbaca tanpa akses Notion — **kalau keduanya berbeda, Notion yang benar.** Perbarui
 > berkas ini setiap kali satu epik bergerak, jangan menunggu semuanya selesai.
 
-**Blocker lintas-epik yang sedang berlaku (per 2026-08-13):**
-`edge-api` **belum punya lapisan basis data sama sekali** — tak ada pgx di `go.mod`, dan
-`config.Store` menyebut `memory|postgres` padahal hanya `memory` yang terimplementasi. Ini
-memblokir seluruh Epik 5 kecuali 5.5, dan menahan bagian "muat dari DB" pada task 2.1.
-Akarnya: PostgreSQL lokal butuh Docker, yang di Resources Notion masih berstatus *Belum Ada*.
+**Blocker lintas-epik SELESAI (per 2026-08-18):** ~~`edge-api` belum punya lapisan basis
+data~~ — `internal/pgstore` ada, Epik 5 tuntas, dan task 2.1 (muat gerbang dari DB) ikut
+selesai menyusul. Ternyata TAK butuh Docker (lihat CATATAN_KEPUTUSAN.md K44). Blocker
+lintas-epik yang MASIH berlaku sekarang seluruhnya bergantung pihak ketiga — lihat §9
+`CATATAN_KEPUTUSAN.md` (H1–H7): protokol printer, scanner, EDC/JTMO fisik, kamera.
 
 ---
 
@@ -33,9 +33,15 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 
 ## EPIK 2 — Manajer Multi-Gerbang & Keselamatan Edge (Dev A)
 - ✅ 2.1 Generalisasi `gatesvc`: N controller + goroutine pemilik per device (PR #4).
-  **Sebagian:** memuat daftar `gates` dari DB belum ada — `edge-api` belum punya lapisan DB
-  sama sekali dan task 5.1 masih Terblokir. `gatesvc.GateSource` adalah tempat sambungnya;
-  sumber saat ini `SpecsFromConfig` (dari `.env`).
+  **Muat dari DB — SELESAI menyusul Epik 5.** `internal/pgstore` mengimplementasikan
+  `gatesvc.GateSource` (`LoadGates`, di `gates.go`) — mode `EDGE_STORE=postgres` memuat
+  gerbang dari tabel `gates` (hanya `status='active'`, terurut `code`), mode memory tetap
+  `SpecsFromConfig` (dari `.env`). Diuji ujung-ke-ujung: biner `edge-api` sungguhan +
+  `TENANT_CODE=dev_jabar SITE_CODE=mall_jabar` (3 gerbang di `db/seed/dev_seed.sql`) →
+  `/api/v1/gates` mengembalikan **3 gerbang** (2 masuk + 1 keluar) — mustahil dari `.env`,
+  yang cuma pernah menghasilkan tepat 2. Site tanpa gerbang aktif gagal keras saat startup
+  (bukan diam-diam jatuh ke `DefaultSpecs`) — "lupa seed" harus kelihatan sebagai kesalahan
+  konfigurasi, bukan tersamar jadi "lahan demo sengaja". Lihat K47.
 - ✅ 2.2 Event WS berlabel `gate_code` + endpoint `/api/v1/sim/gates/:code/...` (PR #4).
 - ✅ 2.3 Interlock keselamatan ditegakkan di jalur driver nyata — `tcpctl.Barrier.Close` +
   penjaga perintah di dalam gelang retry (PR #3). Tidak berlaku pada `barrier_mode: pulse`

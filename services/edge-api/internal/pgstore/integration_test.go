@@ -24,6 +24,7 @@ import (
 
 	"github.com/jabar-creative/parkir/edge-api/internal/audit"
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
+	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
 	"github.com/jabar-creative/parkir/edge-api/internal/ids"
 )
 
@@ -32,6 +33,7 @@ type testHandles struct {
 	tenantCode string
 	siteCode   string
 	tenantID   string
+	siteID     string
 	nodeID     string
 }
 
@@ -72,15 +74,20 @@ func openTestStore(t *testing.T) (*Store, testHandles, func()) {
 		t.Fatalf("pgstore.New: %v", err)
 	}
 
-	h := testHandles{pool: pool, tenantCode: tenantCode, siteCode: siteCode, tenantID: tenantID, nodeID: nodeID}
+	h := testHandles{
+		pool: pool, tenantCode: tenantCode, siteCode: siteCode,
+		tenantID: tenantID, siteID: siteID, nodeID: nodeID,
+	}
 	cleanup := func() {
-		// Urutan mundur dari FK (audit_logs/payments/vehicles_log/tariffs/memberships → sites → tenants).
+		// Urutan mundur dari FK (audit_logs/payments/vehicles_log/tariffs/memberships/gates → sites → tenants).
 		_, _ = pool.Exec(ctx, `DELETE FROM audit_logs WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM payments WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM vehicles_log WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM memberships WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM tariffs WHERE site_id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM ticket_counters WHERE site_id = $1`, siteID)
+		_, _ = pool.Exec(ctx, `DELETE FROM devices WHERE site_id = $1`, siteID)
+		_, _ = pool.Exec(ctx, `DELETE FROM gates WHERE site_id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM sites WHERE id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenantID)
 		pool.Close()
@@ -256,5 +263,44 @@ func TestAuditChainSurvivesRestart(t *testing.T) {
 	}
 	if broken, ok := s2.VerifyChain(); !ok {
 		t.Fatalf("rantai gabungan harus tetap utuh lintas restart, rusak di seq %d", broken)
+	}
+}
+
+// TestLoadGates — task 2.1: daftar gerbang datang dari tabel `gates`, bukan `.env`. Menguji
+// tiga hal sekaligus: (1) hanya gerbang `active` yang termuat, (2) urutannya sesuai `code`
+// (stabil lintas restart), (3) site KOSONG gerbang gagal keras, bukan diam-diam jatuh ke
+// default simulator — supaya "lupa seed" tak pernah tersamar sebagai "lahan demo sengaja".
+func TestLoadGates(t *testing.T) {
+	s, h, cleanup := openTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Site baru dari openTestStore belum punya gerbang sama sekali — LoadGates harus gagal.
+	if _, err := s.LoadGates(ctx); err == nil {
+		t.Fatal("LoadGates atas site tanpa gerbang harus gagal, bukan diam-diam kosong")
+	}
+
+	if _, err := h.pool.Exec(ctx, `
+		INSERT INTO gates (id, site_id, code, kind, controller_addr, transport, endpoint, status) VALUES
+			($1, $4, 'GATE-IN-01', 'ENTRY', 1, 'sim', '', 'active'),
+			($2, $4, 'GATE-OUT-01', 'EXIT', 2, 'sim', '', 'active'),
+			($3, $4, 'GATE-IN-02-NONAKTIF', 'ENTRY', 3, 'sim', '', 'inactive')`,
+		ids.NewV7(), ids.NewV7(), ids.NewV7(), h.siteID); err != nil {
+		t.Fatalf("seed gates: %v", err)
+	}
+
+	specs, err := s.LoadGates(ctx)
+	if err != nil {
+		t.Fatalf("LoadGates: %v", err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("harus cuma 2 gerbang active (yang inactive tak ikut termuat), dapat %d: %+v",
+			len(specs), specs)
+	}
+	if specs[0].Code != "GATE-IN-01" || specs[1].Code != "GATE-OUT-01" {
+		t.Fatalf("urutan harus menaik berdasar code, dapat %+v", specs)
+	}
+	if specs[0].Kind != gatesvc.KindEntry || specs[1].Kind != gatesvc.KindExit {
+		t.Fatalf("kind tak sesuai kolom `kind`, dapat %+v", specs)
 	}
 }

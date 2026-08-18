@@ -70,7 +70,12 @@ func run() error {
 	// datanya hidup. Seed tarif/member demo di bawah HANYA untuk mode memory (D12): mode
 	// postgres membaca data sungguhan dari tabel tariffs/memberships (task 5.2/5.4), bukan
 	// data karangan yang muncul lagi tiap restart.
+	//
+	// gateSource ikut ditentukan di sini (task 2.1): mode postgres memuat gerbang dari
+	// tabel `gates`, mode memory tetap dari `.env` (SpecsFromConfig) — tabel `gates` cuma
+	// berarti kalau ada repository sungguhan di baliknya.
 	var store gatesvc.Store
+	var gateSource gatesvc.GateSource
 	switch cfg.Store {
 	case "postgres":
 		pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
@@ -83,6 +88,7 @@ func run() error {
 			return fmt.Errorf("gagal menyiapkan repository postgres: %w", err)
 		}
 		store = pgs
+		gateSource = pgs
 		slog.Info("repository: postgres", "tenant_code", cfg.TenantCode, "site_code", cfg.SiteCode)
 	default: // "memory" (D12) — juga default aman bila EDGE_STORE tak diset/salah eja
 		ms := memstore.New(cfg.NodeID, time.Now)
@@ -93,6 +99,7 @@ func run() error {
 		ms.AddMember("04A1B2C3", []string{"D1234ABC"}, "mobil", time.Now().AddDate(1, 0, 0))
 		ms.AddMember("04D4E5F6", []string{"D5678XYZ"}, "motor", time.Now().AddDate(0, 6, 0))
 		store = ms
+		gateSource = gatesvc.SpecsFromConfig(cfg)
 		slog.Info("repository: memory (demo/simulator, D12)")
 	}
 
@@ -102,12 +109,11 @@ func run() error {
 	if cfg.Store == "postgres" { // proxy: mode produksi → jangan palsukan OCR
 		rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
 	}
-	// Daftar gerbang datang dari konfigurasi selama repository pgx (task 5.1) belum ada.
 	svc, err := gatesvc.New(gatesvc.Config{
 		NodeID: cfg.NodeID, TenantID: cfg.TenantCode, SiteID: cfg.SiteCode,
 		Site:       gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000, LostTicketPenalty: 20000},
 		Recognizer: rec, LPRDeadline: cfg.LPRDeadline,
-		Source: gatesvc.SpecsFromConfig(cfg),
+		Source: gateSource,
 	}, hub, store)
 	if err != nil {
 		return fmt.Errorf("konfigurasi gerbang tidak sah: %w", err)

@@ -606,6 +606,29 @@ postgres, dan dokumen ini menegaskannya eksplisit supaya tak ada yang membaca 3.
 
 ---
 
+## 7f. Muat gerbang dari tabel `gates` — task 2.1, susulan Epik 5 (K47)
+
+### K47 — Site tanpa gerbang aktif GAGAL KERAS, tak jatuh ke `DefaultSpecs`
+`gatesvc.GateSource.LoadGates` versi `.env` (`SpecsFromConfig`) tak pernah bisa kosong — selalu
+menghasilkan tepat 2 gerbang dari `GATE_IN_*`/`GATE_OUT_*`. Versi pgx (`pgstore.LoadGates`) BISA
+kosong secara sah: site baru yang belum di-seed gerbangnya. Godaan pertama: jatuhkan ke
+`DefaultSpecs()` (2 gerbang simulator) supaya lahan tetap "bisa jalan". Ditolak.
+
+**Alasan:** lahan yang gagal start karena lupa seed gerbang adalah kegagalan yang JELAS — muncul
+di log startup, operator langsung tahu ada yang salah. Lahan yang diam-diam jalan dengan 2
+gerbang simulator karena tabelnya kosong adalah kegagalan SENYAP — semua terlihat baik-baik saja
+sampai ada yang bertanya kenapa GATE-IN-02 yang seharusnya ada tak pernah muncul di dashboard.
+Pola yang sama dengan K18 (code kembar menghentikan startup) dan K39 — konfigurasi yang salah
+lebih baik menghentikan startup daripada melayani dengan asumsi diam-diam.
+
+**Harga:** deploy pertama ke site baru WAJIB `db/seed/dev_seed.sql`-serupa (atau INSERT manual ke
+`gates`) dijalankan LEBIH DULU sebelum `EDGE_STORE=postgres` bisa naik — satu langkah ekstra
+dibanding mode memory yang selalu langsung jalan tanpa seed apa pun.
+
+*Sumber: `internal/pgstore/gates.go`, `internal/pgstore/integration_test.go` (`TestLoadGates`).*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -653,6 +676,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-18 | K47 ditambahkan (task 2.1 — muat gerbang dari tabel `gates`, susulan Epik 5). |
 | 2026-08-16 | K46 ditambahkan (task 3.5 — pemulihan DATA dibuktikan `TestVehicleDataSurvivesRestart`; K35 ditandai selesai lewat addendum, bukan ditimpa). |
 | 2026-08-16 | K39–K45 ditambahkan (task 5.1–5.4 — repository pgx, diuji terhadap Postgres 16 sungguhan tanpa Docker). Utang teknis "tak ada lapisan basis data" ditandai selesai. |
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |

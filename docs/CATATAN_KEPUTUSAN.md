@@ -754,9 +754,8 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 - ~~Tak ada lapisan basis data di `edge-api`~~ **SELESAI task 5.1–5.4** — `internal/pgstore`
   menggantikan `memstore` lewat `EDGE_STORE=postgres`, diuji terhadap Postgres 16 sungguhan
-  (K39–K45). Yang MASIH belum tersambung ke DB: "muat daftar gerbang dari tabel `gates`" pada
-  task 2.1 — `gatesvc.GateSource` masih baca dari `.env`/config statis, bukan query DB, walau
-  tabelnya sudah ada & terisi lewat seed (K44). Itu task terpisah, bukan bagian 5.1–5.4.
+  (K39–K45). ~~"Muat gerbang dari tabel `gates`" (task 2.1)~~ **SELESAI juga** (K47) — susulan
+  Epik 5, PR #8.
 - **`AuditEntries`/`VerifyChain` pgstore scan penuh tanpa jendela** (K43) — isu skala terbuka
   untuk lahan berumur sangat panjang, bukan bug, tapi juga bukan sudah "selesai selamanya".
 - **Printer tiket belum punya adapter konkret** (H1). Gerbang masuk nyata memakai printer

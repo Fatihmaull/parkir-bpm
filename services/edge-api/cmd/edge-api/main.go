@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/gatesvc"
 	"github.com/jabar-creative/parkir/edge-api/internal/lpr"
 	"github.com/jabar-creative/parkir/edge-api/internal/memstore"
+	"github.com/jabar-creative/parkir/edge-api/internal/pgstore"
 	"github.com/jabar-creative/parkir/edge-api/internal/svcnotify"
 	"github.com/jabar-creative/parkir/edge-api/internal/syncagent"
 	"github.com/jabar-creative/parkir/edge-api/internal/wsbus"
@@ -62,26 +64,71 @@ func run() error {
 		"gate_in", cfg.GateIn.Transport, "gate_out", cfg.GateOut.Transport)
 
 	hub := wsbus.NewHub()
-	store := memstore.New(cfg.NodeID, time.Now)
-	// Seed tarif default agar fare engine berfungsi di mode demo.
-	store.SetRate("mobil", gate.RateCard{BaseRate: 5000})
-	store.SetRate("motor", gate.RateCard{BaseRate: 2000})
-	// Seed member demo (registrasi RFID §8.1).
-	store.AddMember("04A1B2C3", []string{"D1234ABC"}, "mobil", time.Now().AddDate(1, 0, 0))
-	store.AddMember("04D4E5F6", []string{"D5678XYZ"}, "motor", time.Now().AddDate(0, 6, 0))
+
+	// Repository (task 5.1): postgres (pgstore) menggantikan memory (memstore) lewat kontrak
+	// yang identik (gatesvc.Store) — tak ada logika gerbang yang berubah, hanya di mana
+	// datanya hidup. Seed tarif/member demo di bawah HANYA untuk mode memory (D12): mode
+	// postgres membaca data sungguhan dari tabel tariffs/memberships (task 5.2/5.4), bukan
+	// data karangan yang muncul lagi tiap restart.
+	//
+	// gateSource ikut ditentukan di sini (task 2.1): mode postgres memuat gerbang dari
+	// tabel `gates`, mode memory tetap dari `.env` (SpecsFromConfig) — tabel `gates` cuma
+	// berarti kalau ada repository sungguhan di baliknya.
+	var store gatesvc.Store
+	var gateSource gatesvc.GateSource
+	switch cfg.Store {
+	case "postgres":
+		pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("gagal membuat pool postgres: %w", err)
+		}
+		defer pool.Close()
+		pgs, err := pgstore.New(context.Background(), pool, cfg.TenantCode, cfg.SiteCode, cfg.NodeID)
+		if err != nil {
+			return fmt.Errorf("gagal menyiapkan repository postgres: %w", err)
+		}
+		store = pgs
+		gateSource = pgs
+		slog.Info("repository: postgres", "tenant_code", cfg.TenantCode, "site_code", cfg.SiteCode)
+	default: // "memory" (D12) — juga default aman bila EDGE_STORE tak diset/salah eja
+		ms := memstore.New(cfg.NodeID, time.Now)
+		// Seed tarif default agar fare engine berfungsi di mode demo.
+		ms.SetRate("mobil", gate.RateCard{BaseRate: 5000})
+		ms.SetRate("motor", gate.RateCard{BaseRate: 2000})
+		// Seed member demo (registrasi RFID §8.1).
+		ms.AddMember("04A1B2C3", []string{"D1234ABC"}, "mobil", time.Now().AddDate(1, 0, 0))
+		ms.AddMember("04D4E5F6", []string{"D5678XYZ"}, "motor", time.Now().AddDate(0, 6, 0))
+		store = ms
+		gateSource = gatesvc.SpecsFromConfig(cfg)
+		slog.Info("repository: memory (demo/simulator, D12)")
+	}
 
 	// Recognizer: mode demo memakai Stub berlabel (BUKAN model nyata; YOLOv8/EasyOCR = Fase 2, §17).
-	// Produksi menyuntik klien gRPC ke lpr-svc via LPR_GRPC_ADDR.
+	// Produksi (postgres) menyuntik klien gRPC nyata ke lpr-svc (task 6.1) via LPR_GRPC_ADDR.
+	//
+	// grpc.NewClient tak memblokir menunggu lpr-svc hidup (lazy connect, lihat lpr.NewGRPC) —
+	// jadi "berhasil di sini" hanya berarti alamatnya sah, BUKAN bahwa lpr-svc benar-benar
+	// menjawab. Itu memang benar: edge-api tak boleh menunggu layanan lain sebelum melayani
+	// gerbang (P1/P2). Kalau lpr-svc mati saat RPC pertama, gatesvc.runLPR sudah menurunkannya
+	// jadi UNREAD sendiri — GRPC di sini tak perlu (dan sengaja tak) berpura-pura sehat.
 	var rec lpr.Recognizer = lpr.Stub{Plate: "D1234ABC", Confidence: 0.91, EngineVersion: "stub-demo-no-model"}
 	if cfg.Store == "postgres" { // proxy: mode produksi → jangan palsukan OCR
-		rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
+		g, err := lpr.NewGRPC(cfg.LPRAddr)
+		if err != nil {
+			slog.Warn("lpr: gagal menyiapkan klien gRPC, jatuh ke degradasi UNREAD",
+				"addr", cfg.LPRAddr, "err", err)
+			rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
+		} else {
+			defer g.Close()
+			rec = g
+			slog.Info("lpr: klien gRPC disiapkan", "addr", cfg.LPRAddr)
+		}
 	}
-	// Daftar gerbang datang dari konfigurasi selama repository pgx (task 5.1) belum ada.
 	svc, err := gatesvc.New(gatesvc.Config{
 		NodeID: cfg.NodeID, TenantID: cfg.TenantCode, SiteID: cfg.SiteCode,
 		Site:       gate.SiteConfig{GraceMinutes: 15, MaxDailyRate: 30000, LostTicketPenalty: 20000},
 		Recognizer: rec, LPRDeadline: cfg.LPRDeadline,
-		Source: gatesvc.SpecsFromConfig(cfg),
+		Source: gateSource,
 	}, hub, store)
 	if err != nil {
 		return fmt.Errorf("konfigurasi gerbang tidak sah: %w", err)

@@ -82,12 +82,12 @@ type Config struct {
 	HealthProbeTimeout time.Duration // batas tunggu satu probe ke goroutine pemilik
 }
 
-// Service menjalankan N gerbang di atas perangkat + memstore + hub.
+// Service menjalankan N gerbang di atas perangkat + repository (memstore atau pgstore) + hub.
 type Service struct {
 	gates map[string]*Runner
 	order []string // urutan sesuai sumber, agar daftar & log stabil
 
-	store *memstore.Store
+	store Store
 	hub   *wsbus.Hub
 	lpr   lpr.Recognizer
 	lprDL time.Duration
@@ -110,7 +110,7 @@ type Service struct {
 // Mengembalikan error bila daftar gerbang tak masuk akal — code kembar, kind tak
 // dikenal, atau transport tcp tanpa endpoint. Konfigurasi gerbang yang salah lebih baik
 // menghentikan startup daripada memunculkan gerbang yang berperilaku ganjil di lapangan.
-func New(cfg Config, hub *wsbus.Hub, store *memstore.Store) (*Service, error) {
+func New(cfg Config, hub *wsbus.Hub, store Store) (*Service, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -257,7 +257,7 @@ func (s *Service) Gate(code string) (*Runner, bool) {
 }
 
 // Store memberi akses ke penyimpanan bersama.
-func (s *Service) Store() *memstore.Store { return s.store }
+func (s *Service) Store() Store { return s.store }
 
 // runLPR memicu pengenalan plat, menulis ocr_logs (SELALU, §7.1), lalu memancarkan
 // lpr.result berlabel gate_code. Hasil tak pernah menggerbang keputusan gerbang (P2/§7.3).

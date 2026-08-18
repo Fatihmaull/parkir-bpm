@@ -44,26 +44,45 @@ type member struct {
 }
 
 type payment struct {
-	id     string
-	txID   string
-	method string
-	amount int64
-	status string // PENDING|SETTLED|FAILED
+	id      string
+	txID    string
+	method  string
+	amount  int64
+	status  string // PENDING|SETTLED|FAILED
+	shiftID string // "" bila tak ada shift terbuka saat payment dibuat (§6.4)
+}
+
+type shift struct {
+	id           string
+	operatorID   string
+	openedAt     time.Time
+	closedAt     time.Time // zero = masih OPEN
+	openingFloat int64
+	declaredCash int64
+	hasDeclared  bool
+	systemCash   int64
+	systemEDC    int64
+	systemQRIS   int64
+	variance     int64
+	note         string
+	status       string // OPEN|CLOSED|VARIANCE
 }
 
 // Store menyimpan seluruh state operasional in-memory.
 type Store struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	vehicles map[string]*vehicle
-	members  map[string]*member // key: rfid uid
-	payments map[string]*payment
-	rates    map[string]gate.RateCard // key: vehicle type
-	chain    *audit.Chain
-	auditLog []audit.Entry
-	ticketN  int
-	outbox   *outbox.Mem
-	ocrLogs  []OcrLog
+	mu             sync.Mutex
+	now            func() time.Time
+	vehicles       map[string]*vehicle
+	members        map[string]*member // key: rfid uid
+	payments       map[string]*payment
+	rates          map[string]gate.RateCard // key: vehicle type
+	chain          *audit.Chain
+	auditLog       []audit.Entry
+	ticketN        int
+	outbox         *outbox.Mem
+	ocrLogs        []OcrLog
+	shifts         map[string]*shift
+	currentShiftID string // "" = tak ada shift terbuka. Satu terminal in-memory = satu shift aktif.
 }
 
 func New(nodeID string, now func() time.Time) *Store {
@@ -78,11 +97,14 @@ func New(nodeID string, now func() time.Time) *Store {
 		rates:    make(map[string]gate.RateCard),
 		chain:    audit.NewChain(nodeID, 0, ""),
 		outbox:   outbox.NewMem(),
+		shifts:   make(map[string]*shift),
 	}
 }
 
-// Outbox mengembalikan antrean sinkronisasi (untuk sync agent & /health).
-func (s *Store) Outbox() *outbox.Mem { return s.outbox }
+// Outbox mengembalikan antrean sinkronisasi (untuk sync agent & /health). Dikembalikan sebagai
+// interface outbox.Store (bukan *outbox.Mem konkret) supaya memstore.Store dan pgstore.Store
+// (task 5.1) punya tanda tangan metode yang identik — syarat keduanya memenuhi gatesvc.Store.
+func (s *Store) Outbox() outbox.Store { return s.outbox }
 
 // ── seed helpers (untuk demo/test) ──
 
@@ -224,7 +246,10 @@ func (s *Store) Begin(ctx context.Context, txID, method string, amount int64) (s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := ids.NewV7()
-	s.payments[id] = &payment{id: id, txID: txID, method: method, amount: amount, status: "PENDING"}
+	s.payments[id] = &payment{
+		id: id, txID: txID, method: method, amount: amount, status: "PENDING",
+		shiftID: s.currentShiftID, // §6.4: payment tercatat ke shift yang sedang terbuka, kalau ada
+	}
 	return id, nil
 }
 
@@ -299,6 +324,22 @@ type MemberView struct {
 	Status      string   `json:"status"`
 }
 
+// ShiftView — ringkasan satu shift kasir untuk dashboard (§6.4/§12.6).
+type ShiftView struct {
+	ID           string `json:"id"`
+	OperatorID   string `json:"operator_id"`
+	OpenedAt     string `json:"opened_at"`
+	ClosedAt     string `json:"closed_at,omitempty"`
+	OpeningFloat int64  `json:"opening_float"`
+	DeclaredCash *int64 `json:"declared_cash,omitempty"`
+	SystemCash   int64  `json:"system_cash"`
+	SystemEDC    int64  `json:"system_edc"`
+	SystemQRIS   int64  `json:"system_qris"`
+	Variance     *int64 `json:"variance,omitempty"`
+	Note         string `json:"note,omitempty"`
+	Status       string `json:"status"` // OPEN|CLOSED|VARIANCE
+}
+
 // Transactions mengembalikan seluruh vehicles_log (untuk Catatan Keuangan & Volume §12.2/12.3).
 func (s *Store) TransactionViews() []TxnView {
 	s.mu.Lock()
@@ -343,6 +384,102 @@ func (s *Store) MemberViews() []MemberView {
 		})
 	}
 	return out
+}
+
+// ── Rekonsiliasi shift (§6.4/§12.6, task 7.4) ──
+
+// OpenShift membuka shift baru. Satu terminal in-memory = satu shift aktif — membuka shift
+// kedua sebelum yang pertama ditutup adalah kesalahan operator, bukan kondisi yang ditolerir
+// diam-diam (kalau dibolehkan, payment berikutnya akan taggingnya ambigu: shift mana?).
+func (s *Store) OpenShift(ctx context.Context, operatorID string, openingFloat int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.currentShiftID != "" {
+		return "", fmt.Errorf("memstore: shift %s masih terbuka, tutup dulu sebelum buka baru", s.currentShiftID)
+	}
+	id := ids.NewV7()
+	s.shifts[id] = &shift{
+		id: id, operatorID: operatorID, openedAt: s.now(),
+		openingFloat: openingFloat, status: "OPEN",
+	}
+	s.currentShiftID = id
+	return id, nil
+}
+
+// CloseShift menghitung total sistem per metode dari payment SETTLED yang tertaut shift ini,
+// lalu selisih = dilaporkan - (kas awal + tunai sistem) — rumus §6.4 persis. Selisih ≠ 0
+// WAJIB disertai note (alasan) — tak ada cara menutup shift senjang tanpa keterangan.
+func (s *Store) CloseShift(ctx context.Context, shiftID string, declaredCash int64, note string) (ShiftView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sh, ok := s.shifts[shiftID]
+	if !ok {
+		return ShiftView{}, fmt.Errorf("memstore: shift %s tidak ditemukan", shiftID)
+	}
+	if sh.status != "OPEN" {
+		return ShiftView{}, fmt.Errorf("memstore: shift %s sudah ditutup", shiftID)
+	}
+
+	var systemCash, systemEDC, systemQRIS int64
+	for _, p := range s.payments {
+		if p.shiftID != shiftID || p.status != "SETTLED" {
+			continue
+		}
+		switch p.method {
+		case gate.MethodCash:
+			systemCash += p.amount
+		case gate.MethodEDCEmoney, gate.MethodEDCDebit:
+			systemEDC += p.amount
+		case gate.MethodQRIS, gate.MethodEwallet:
+			systemQRIS += p.amount
+		}
+	}
+	variance := declaredCash - (sh.openingFloat + systemCash)
+	if variance != 0 && note == "" {
+		return ShiftView{}, fmt.Errorf("memstore: selisih %d — wajib isi catatan alasan (§6.4)", variance)
+	}
+
+	sh.closedAt = s.now()
+	sh.declaredCash, sh.hasDeclared = declaredCash, true
+	sh.systemCash, sh.systemEDC, sh.systemQRIS = systemCash, systemEDC, systemQRIS
+	sh.variance = variance
+	sh.note = note
+	if variance != 0 {
+		sh.status = "VARIANCE"
+	} else {
+		sh.status = "CLOSED"
+	}
+	if s.currentShiftID == shiftID {
+		s.currentShiftID = ""
+	}
+	return shiftViewOf(sh), nil
+}
+
+// ShiftViews mengembalikan seluruh shift (untuk GET /api/v1/shifts).
+func (s *Store) ShiftViews() []ShiftView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ShiftView
+	for _, sh := range s.shifts {
+		out = append(out, shiftViewOf(sh))
+	}
+	return out
+}
+
+func shiftViewOf(sh *shift) ShiftView {
+	v := ShiftView{
+		ID: sh.id, OperatorID: sh.operatorID, OpenedAt: sh.openedAt.Format(time.RFC3339),
+		OpeningFloat: sh.openingFloat, SystemCash: sh.systemCash, SystemEDC: sh.systemEDC,
+		SystemQRIS: sh.systemQRIS, Note: sh.note, Status: sh.status,
+	}
+	if !sh.closedAt.IsZero() {
+		v.ClosedAt = sh.closedAt.Format(time.RFC3339)
+	}
+	if sh.hasDeclared {
+		v.DeclaredCash = &sh.declaredCash
+		v.Variance = &sh.variance
+	}
+	return v
 }
 
 // OccupancyByType menghitung kendaraan IN_PREMISES per jenis (Mapping Slot §12.4).

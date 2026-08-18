@@ -9,11 +9,11 @@ Status: ✅ selesai · 🔧 sebagian · ⬜ belum · 🚧 terblokir.
 > tetap terbaca tanpa akses Notion — **kalau keduanya berbeda, Notion yang benar.** Perbarui
 > berkas ini setiap kali satu epik bergerak, jangan menunggu semuanya selesai.
 
-**Blocker lintas-epik yang sedang berlaku (per 2026-08-13):**
-`edge-api` **belum punya lapisan basis data sama sekali** — tak ada pgx di `go.mod`, dan
-`config.Store` menyebut `memory|postgres` padahal hanya `memory` yang terimplementasi. Ini
-memblokir seluruh Epik 5 kecuali 5.5, dan menahan bagian "muat dari DB" pada task 2.1.
-Akarnya: PostgreSQL lokal butuh Docker, yang di Resources Notion masih berstatus *Belum Ada*.
+**Blocker lintas-epik SELESAI (per 2026-08-18):** ~~`edge-api` belum punya lapisan basis
+data~~ — `internal/pgstore` ada, Epik 5 tuntas, dan task 2.1 (muat gerbang dari DB) ikut
+selesai menyusul. Ternyata TAK butuh Docker (lihat CATATAN_KEPUTUSAN.md K44). Blocker
+lintas-epik yang MASIH berlaku sekarang seluruhnya bergantung pihak ketiga — lihat §9
+`CATATAN_KEPUTUSAN.md` (H1–H7): protokol printer, scanner, EDC/JTMO fisik, kamera.
 
 ---
 
@@ -33,9 +33,15 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 
 ## EPIK 2 — Manajer Multi-Gerbang & Keselamatan Edge (Dev A)
 - ✅ 2.1 Generalisasi `gatesvc`: N controller + goroutine pemilik per device (PR #4).
-  **Sebagian:** memuat daftar `gates` dari DB belum ada — `edge-api` belum punya lapisan DB
-  sama sekali dan task 5.1 masih Terblokir. `gatesvc.GateSource` adalah tempat sambungnya;
-  sumber saat ini `SpecsFromConfig` (dari `.env`).
+  **Muat dari DB — SELESAI menyusul Epik 5.** `internal/pgstore` mengimplementasikan
+  `gatesvc.GateSource` (`LoadGates`, di `gates.go`) — mode `EDGE_STORE=postgres` memuat
+  gerbang dari tabel `gates` (hanya `status='active'`, terurut `code`), mode memory tetap
+  `SpecsFromConfig` (dari `.env`). Diuji ujung-ke-ujung: biner `edge-api` sungguhan +
+  `TENANT_CODE=dev_jabar SITE_CODE=mall_jabar` (3 gerbang di `db/seed/dev_seed.sql`) →
+  `/api/v1/gates` mengembalikan **3 gerbang** (2 masuk + 1 keluar) — mustahil dari `.env`,
+  yang cuma pernah menghasilkan tepat 2. Site tanpa gerbang aktif gagal keras saat startup
+  (bukan diam-diam jatuh ke `DefaultSpecs`) — "lupa seed" harus kelihatan sebagai kesalahan
+  konfigurasi, bukan tersamar jadi "lahan demo sengaja". Lihat K47.
 - ✅ 2.2 Event WS berlabel `gate_code` + endpoint `/api/v1/sim/gates/:code/...` (PR #4).
 - ✅ 2.3 Interlock keselamatan ditegakkan di jalur driver nyata — `tcpctl.Barrier.Close` +
   penjaga perintah di dalam gelang retry (PR #3). Tidak berlaku pada `barrier_mode: pulse`
@@ -48,7 +54,7 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ✅ 2.6 Logika tutup dipicu sensor (LD rising→falling) pada driver nyata — `tcpctl` tersambung ke
   `gatesvc` untuk transport `tcp`.
 
-## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A) — ✅ TUNTAS kecuali pemulihan DATA (3.5, tertahan Epik 5)
+## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A) — ✅ TUNTAS (termasuk pemulihan DATA, 3.5)
 - ✅ 3.1 `edge-api` sebagai service systemd/Windows + watchdog — unit `Type=notify` dengan
   `WatchdogSec` (`deploy/systemd/`), NSSM + Scheduled Task untuk Windows (`deploy/windows/`),
   sd_notify di `internal/svcnotify`. Kegagalan fatal kini mematikan proses (dulu menggantung
@@ -63,12 +69,15 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
   goroutine pemilik (gerbang tersendat dilaporkan, bukan menggantungkan healthcheck);
   `GET /api/v1/gates/:code/health`, rollup `gates_status` di `/api/v1/health`, event
   `gate.health.changed` hanya saat status berubah.
-- 🔧 3.5 Pemulihan < 15 dtk (NFR-2.3). **Layanan: terpenuhi & terukur** — siklus penuh
+- ✅ 3.5 Pemulihan < 15 dtk (NFR-2.3). **Layanan: terpenuhi & terukur** — siklus penuh
   SIGTERM→berhenti→nyala→`READY=1` = **2,01 dtk** terburuk dari 5 putaran (alat ukur:
   `deploy/ukur-pemulihan.sh`). Restart di tengah transaksi diuji dan menemukan bug: palang
   yang ditinggalkan terbuka tak pernah ditutup — kini ditutup saat startup dengan bukti
-  positif loop bawah LOW (K36). **Data: BELUM** — `memstore` in-process, restart menghapus
-  seluruh kendaraan di dalam lahan. Terblokir task 5.1 (pgx). Lihat K35.
+  positif loop bawah LOW (K36). **Data: SELESAI** (menyusul Epik 5) — dengan
+  `EDGE_STORE=postgres`, kendaraan yang masuk SEBELUM restart tetap dikenali & bisa keluar
+  normal SESUDAHNYA, dibuktikan `TestVehicleDataSurvivesRestart` (`internal/pgstore`,
+  `go test -tags=integration`, terhadap Postgres sungguhan — bukan memstore, yang memang
+  masih kehilangan semuanya kalau dipakai). Lihat K35 (ditandai selesai) & K39–K46.
 - ✅ 3.6 Chaos test lahan (`gatesvc/chaos_test.go`): cabut LAN satu gerbang (lahan tetap
   melayani, P8), kertas habis (casual berhenti, member tetap masuk, D3), internet putus
   (gerbang tak tersentuh, outbox menumpuk, P1), + semua rusak sekaligus. "Edge mati" diuji
@@ -82,16 +91,57 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ⬜ 4.3 Integrasi scanner QR/barcode di POS keluar (USB-HID wedge / serial) (H4).
 - ✅ 4.4 Abstraksi `TicketPrinter` + degradasi (v2).
 
-## EPIK 5 — Persistensi & Repository pgx (Dev A) — *tertahan Docker*
-- ⬜ 5.1 Repository pgx menggantikan `memstore` (interface identik) — vehicles_log, payments, memberships,
-  ocr_logs, audit_logs, outbox, gates/devices.
-- ⬜ 5.2 Validasi migrasi goose terhadap PostgreSQL nyata + `grants.sql`.
-- ⬜ 5.3 Enforcement `tenant_id` + `site_id` di lapisan repository (§12.14).
-- ⬜ 5.4 Seed & fixtures multi-lahan/multi-gerbang.
+## EPIK 5 — Persistensi & Repository pgx (Dev A) — ✅ TUNTAS
+Ternyata TAK butuh Docker sama sekali — sandbox pengerjaan ini sudah punya paket
+`postgresql-16` terpasang (server, bukan cuma client), jadi seluruh task di bawah diuji
+terhadap Postgres SUNGGUHAN secara lokal, bukan cuma `go vet`. Lihat CATATAN_KEPUTUSAN.md K41.
+- ✅ 5.1 Repository pgx (`internal/pgstore`) menggantikan `memstore` lewat kontrak identik
+  (`gatesvc.Store`, interface baru yang disatukan) — vehicles_log, payments, memberships,
+  tariffs, ocr_logs, audit_logs (rantai hash persisten lintas restart), outbox (transaksional,
+  tabel `sync_outbox`), ticket_counters (penomoran tiket atomik per site, migrasi baru 00006).
+  Diuji ujung-ke-ujung: biner `edge-api` sungguhan + `EDGE_STORE=postgres` + gerbang simulator,
+  kendaraan lewat GATE-IN-01 sampai `vehicles_log` COMMITTED, `audit_logs` bertaut hash benar,
+  `sync_outbox` terisi transaksional. 2 bug nyata ditemukan & diperbaiki lewat uji integrasi
+  (bukan dugaan): (1) `flags` nil di `Complete` membentur NOT NULL constraint — memstore tak
+  pernah menyentuh ini karena map Go menerima nil slice tanpa keluhan; (2) hash rantai audit
+  dihitung dari `created_at` presisi nanodetik tapi Postgres `timestamptz` hanya presisi
+  mikrodetik → `VerifyChain` SELALU melaporkan rantai rusak pada baca-ulang pertama walau tak
+  ada yang dimanipulasi, sampai `created_at` dipotong ke mikrodetik SEBELUM dihash.
+- ✅ 5.2 Migrasi goose (termasuk 00006 baru) + `db/grants.sql` divalidasi terhadap Postgres 16
+  sungguhan — `REVOKE UPDATE/DELETE/TRUNCATE` teruji langsung menolak `app_user` (privilege,
+  bukan cuma trigger). CI (`ci.yml`) sekarang menjalankan migrasi + `go test -tags=integration`
+  terhadap `postgres:16` sebagai service container GitHub Actions per run — efemeral, tanpa
+  Docker di mesin developer mana pun.
+- ✅ 5.3 Enforcement `tenant_id`/`site_id` (§12.14) — diikat SEKALI saat `pgstore.New` (dari
+  `TENANT_CODE`/`SITE_CODE`, di-resolve ke UUID), dipakai di SETIAP query yang ditulis di
+  repository, bukan diterima per-panggilan. Realitas fisik "Edge = satu proses per lahan"
+  membuat pengikatan di konstruksi ini mustahil dilewatkan, dibanding mempercayai tiap
+  pemanggil mengirim tenant_id benar tiap kali.
+- ✅ 5.4 Seed dev multi-lahan/multi-gerbang — `db/seed/dev_seed.sql` (`make seed`): 2 tenant
+  (satu dengan 2 site, untuk uji isolasi antar-site DALAM satu tenant — kasus paling gampang
+  bocor), site pertama dapat 2 gerbang masuk + 1 keluar. Idempoten (`ON CONFLICT DO NOTHING`),
+  diuji dijalankan dua kali berturut-turut.
 - ✅ 5.5 Skema DDL + memstore in-memory (v2).
 
 ## EPIK 6 — LPR / OCR (Dev A)
-- ⬜ 6.1 Klien gRPC nyata ke `lpr-svc` (butuh protoc + stub).
+- ✅ 6.1 Klien gRPC nyata ke `lpr-svc`. Stub Go di-generate dari `proto/lpr.proto`
+  (`protoc`+`protoc-gen-go`+`protoc-gen-go-grpc` → `internal/lpr/lprpb`, DI-COMMIT — beda
+  dari sisi Python) dan diimpor `internal/lpr/grpc.go` (`lpr.GRPC`, memenuhi `Recognizer`).
+  Sisi Python: `lpr_svc/server.py` sebelumnya cuma print pesan (`TODO Minggu 2`) — sekarang
+  benar-benar `grpc.server` yang bind & serve, stub-nya di-generate `gen_proto.sh` (SENGAJA
+  tak di-commit, `.gitignore`) supaya tak basi terhadap proto. `main.go`: mode postgres
+  mencoba `lpr.NewGRPC(cfg.LPRAddr)`, jatuh ke `lpr.Degraded` (UNREAD) kalau gagal — P2, LPR
+  tak pernah jadi gerbang keputusan atau dependensi keras startup.
+  "Kecerdasan" di baliknya (YOLOv8n/EasyOCR) TETAP placeholder — itu task 6.2 terpisah;
+  6.1 murni transport gRPC-nya, dan itu yang dibuktikan nyata: proses Python sungguhan
+  dijalankan, klien Go memanggilnya lewat gRPC beneran (bukan mock), responsnya (termasuk
+  `engine_version` dari proses server) mengalir sampai `ocr_logs` di Postgres lalu terbaca
+  balik lewat `/api/v1/ocr-logs`. Diuji: `go test -tags=integration ./internal/lpr/...`
+  (`TestGRPCRecognizeAgainstRealServer`) + `pytest` Python (`test_server.py`, server
+  in-process di port efemeral) + ujung-ke-ujung biner+proses nyata. CI: job `lpr-svc`
+  sekarang `pip install -r requirements.txt` (dulu cuma `pytest`) + `./gen_proto.sh`
+  sebelum `pytest`, supaya server gRPC beneran ikut teruji tiap push, bukan cuma
+  `normalize.py`.
 - ⬜ 6.2 Model YOLOv8n + EasyOCR/Tesseract di `lpr-svc` (Fase 2).
 - ⬜ 6.3 Trigger snapshot RTSP per gerbang; tulis `ocr_logs` + komparasi foto keluar.
 - ✅ 6.4 Normalisasi plat + verdict + abstraksi Recognizer + degradasi UNREAD (v2).
@@ -100,7 +150,19 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - 🔧 7.1 Adapter EDC/JTMO fisik (menunggu unit + SDK; simulator sudah ada) (Q1/Q2).
 - ✅ 7.2 Tunai, EDC-sim, member, aturan D8 timeout≠gagal (v2).
 - ✅ 7.3 QRIS/e-wallet mint + webhook (signature+idempotensi), PG disimulasikan (v2).
-- ⬜ 7.4 Rekonsiliasi shift end-to-end + laporan (§6.4) tersambung data nyata.
+- ✅ 7.4 Rekonsiliasi shift end-to-end + laporan (§6.4) tersambung data nyata. Skema `shifts`
+  + `payments.shift_id` sudah ada sejak migrasi 00004 (belum dipakai) — logika buka/tutup/
+  hitung ditambahkan di `internal/pgstore/shifts.go` + `internal/memstore` (kontrak identik
+  lewat `gatesvc.Store`), plus `GET/POST /api/v1/shifts`, `POST /open`, `POST /{id}/close`
+  (`cmd/edge-api/shifts.go`). `payments.Begin` menaut ke shift terbuka otomatis lewat
+  subquery. Satu shift aktif per site ditegakkan unique index parsial DB (migrasi 00007),
+  bukan cek app-level (K48). Selisih ≠ 0 wajib note; di atas `sites.cash_variance_threshold`
+  → audit `critical`, di bawahnya → `warning` (pgstore saja — memstore tak audit, K48).
+  Diuji: unit test memstore (`go test ./...`) + integrasi pgstore
+  (`TestShiftReconciliation`, `go test -tags=integration`) + ujung-ke-ujung lewat biner
+  sungguhan (buka shift → HTTP 409 saat buka kedua kalinya → transaksi lewat gerbang
+  simulator → tutup shift → laporan). Ketemu bug uji nyata di luar fitur ini sendiri: lihat
+  K49 (fixture ID test tak benar-benar unik).
 
 ## EPIK 8 — Sync & Agregasi (Dev A + Dev B)
 - ✅ 8.1 Outbox transaksional + sync agent + backoff + HTTP sink (v2, e2e).

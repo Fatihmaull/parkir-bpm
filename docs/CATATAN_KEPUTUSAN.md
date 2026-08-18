@@ -400,6 +400,12 @@ yang terblokir Docker. Menuliskannya di sini supaya "NFR-2.3 terpenuhi" tidak pe
 sebagai "restart itu aman bagi transaksi berjalan" — dua hal yang sangat berbeda, dan
 selisihnya adalah uang pelanggan.
 
+> **Update 2026-08-16 — SELESAI.** Epik 5 tuntas (ternyata tak butuh Docker, lihat K44) dan
+> pemulihan DATA kini terbukti untuk `EDGE_STORE=postgres` — lihat K46. Paragraf di atas
+> dibiarkan apa adanya (bukan dihapus) karena mendokumentasikan keadaan yang BENAR pada
+> saat ditulis; §5.4 kredo dokumen ini adalah rekaman keputusan, bukan status hidup. Yang
+> berubah dicatat sebagai entri baru (K46), bukan menimpa yang lama.
+
 ### K36 — Palang yang ditinggalkan proses sebelumnya ditutup saat startup ⚠️
 Relay controller mempertahankan posisinya melewati matinya edge-api. Proses yang mati saat
 palang terangkat meninggalkan gerbang **terbuka selamanya**: proses baru memulai state
@@ -466,6 +472,258 @@ Tiga jalan keluar ditambahkan:
 
 ---
 
+## 7e. Persistensi pgx — task 5.1–5.4 (K39–K46)
+
+### K39 — tenant_id/site_id diikat SEKALI di konstruksi `pgstore.New`, bukan per-panggilan
+`gate.Store`/`gate.ExitStore`/dst. tak punya parameter tenant_id sama sekali — kontraknya
+identik dengan memstore (task 5.1 menuntut ini). Enforcement §12.14 karenanya tak bisa lewat
+tanda tangan metode; ia lewat konstruksi: `pgstore.New` meresolusi `TENANT_CODE`/`SITE_CODE`
+jadi UUID sekali di awal, dan SETIAP query yang ditulis di paket ini memakai nilai yang sama.
+
+**Harga:** satu proses `pgstore.Store` hanya bisa melayani SATU tenant+site — cocok dengan
+realitas fisik (Edge = satu PC per lahan), tapi berarti repository ini secara sengaja tak bisa
+dipakai ulang untuk skenario multi-tenant-per-proses (itu memang peran Cloud, bukan Edge).
+
+### K40 — `audit.Chain` dipecah jadi `Next` (hitung, tak memajukan) + `Commit` (majukan setelah
+tersimpan) ⚠️
+`memstore.Store.Record` aman memakai `Chain.Append` (hitung+majukan sekaligus) karena
+penyimpanannya in-memory — tak pernah "gagal tersimpan". `pgstore.Store.Record` bisa gagal di
+tengah (pool putus, dll). Kalau chain sudah dimajukan SEBELUM baris benar-benar ter-INSERT,
+kegagalan meninggalkan celah seq permanen di DB — `VerifyChain` berikutnya melaporkan "rusak"
+untuk transaksi yang sebenarnya cuma gagal, bukan dimanipulasi (P5: negatif-palsu di jalur
+anti-fraud sama buruknya dengan negatif-palsu di interlock keselamatan).
+
+Urutan yang benar: `Next` (hitung entri, TAK mengubah state) → INSERT → `Commit` (majukan
+state) HANYA setelah INSERT terbukti sukses. `Next` boleh dipanggil berulang tanpa `Commit` di
+antaranya (retry aman, menghasilkan entri identik). `Chain.Append` dipertahankan sebagai
+`Next`+`Commit` sekaligus — perilaku memstore tak berubah sedikit pun.
+
+**Harga:** kalau proses mati TEPAT di antara INSERT sukses dan `Commit` (jendela sangat
+sempit), percobaan `Record` berikutnya akan membentur `UNIQUE(node_id, seq)` di DB dan gagal
+keras. Diterima dengan sengaja — lebih baik satu event audit gagal tercatat dengan jelas
+(alert, log) daripada rantai diam-diam bercabang dua current_hash untuk seq yang sama.
+
+### K41 — `created_at` dipotong ke presisi MIKROdetik sebelum dihash ⚠️ (ditemukan lewat uji nyata)
+Formula hash (`chain.go`) memasukkan `created_at.Format(RFC3339Nano)` — presisi NANOdetik ala
+Go. `timestamptz` PostgreSQL hanya menyimpan presisi mikrodetik. Akibatnya: hash dihitung saat
+`Record` memakai timestamp presisi-nano, tapi saat baris yang sama dibaca balik dari DB untuk
+`VerifyChain`, timestamp-nya sudah terpotong — `computeHash` ulang menghasilkan hash BEDA dari
+yang tersimpan, dan `VerifyChain` melaporkan rantai rusak pada baca-ulang PERTAMA, walau tak
+ada satu byte pun yang dimanipulasi siapa pun.
+
+Ini TIDAK ditemukan lewat `go vet`/unit test (memstore tak pernah menulis-lalu-baca-ulang lewat
+media dengan presisi berbeda) — ketahuan hanya karena uji integrasi dijalankan terhadap
+PostgreSQL 16 sungguhan (lihat K43) dan `TestAuditChainSurvivesRestart` gagal telak. **Inilah
+persis alasan chaos test/uji integrasi ada** (bandingkan K38): uji unit memeriksa jalan yang
+kita bayangkan, uji terhadap sistem nyata memeriksa yang tak kita bayangkan sama sekali.
+
+Perbaikan: `pgstore.Record` memotong `e.CreatedAt` ke `time.Microsecond` SEBELUM memanggil
+`chain.Next` — hash yang dihitung sekarang PASTI sama dengan yang akan dihitung ulang dari
+representasi yang benar-benar tersimpan. `audit.Chain` sendiri tak diubah (ia tetap DB-agnostic
+by design); pemotongan ini murni tanggung jawab lapisan repository yang tahu presisi medianya.
+
+### K42 — `Settle`/`Fail` di pgstore menyimpan rincian PENUH — sengaja BUKAN "parity" dengan memstore
+`memstore.Settle`/`Fail` membuang seluruh `SettleInfo` (tendered, change, approval code, masked
+PAN, dst.) — cuma mengubah status. Ini bukan kontrak yang harus ditiru persis, ini keterbatasan
+in-memory (tak ada tempat menyimpannya di luar umur proses). Kolom-kolom itu ADA di skema
+`payments` justru untuk ini (§6.2.1 masked PAN). `pgstore` menuliskannya penuh.
+
+**Harga:** perilaku pgstore dan memstore kini beda secara OBSERVABLE untuk `PaymentViews`/dsb.
+walau tanda tangan metodenya identik ("interface identik" task 5.1 berlaku untuk KONTRAK, bukan
+untuk sejauh mana implementasi memory yang disederhanakan boleh menyembunyikan data). Membuang
+data yang jelas-jelas diminta ditulis skema demi "konsistensi" dengan stub demo akan jadi
+regresi diam-diam dari maksud PRD, bukan kepatuhan yang sah.
+
+### K43 — `AuditEntries`/`VerifyChain` pgstore scan PENUH, sengaja TAK di-windowed
+`/api/v1/health` memanggil `AuditEntries()` tiap request (dipoll monitoring). Godaan pertama:
+batasi ke N baris terbaru (`ORDER BY seq DESC LIMIT n`) demi kecepatan. Ditolak: `audit.Verify`
+menuntut rantai dimulai dari genesis (seq 1, `previous_hash` = `GenesisHash`) — jendela yang
+dipotong TIDAK dimulai dari sana, jadi `Verify` akan SELALU melaporkan "rusak" di entri
+pertama jendela (false positive terus-menerus), atau — kalau baseline-nya sekadar "dipercaya"
+tanpa diverifikasi balik ke DB — celah verifikasi diam-diam (tampering di luar jendela tak
+pernah terdeteksi). Dua-duanya lebih buruk daripada query yang lambat.
+
+**Harga:** untuk lahan berumur sangat panjang, `/api/v1/health` bisa jadi query yang tumbuh
+mahal. Diterima sebagai isu skala TERBUKA (bukan TODO tersembunyi di kode) — perbaikan yang
+benar adalah verifikasi berbasis checkpoint (baseline seq+hash tersimpan terpisah), bukan
+`LIMIT` polos. Dicatat di sini justru supaya siapa pun yang tergoda menambah `LIMIT` nanti
+membaca alasan ini dulu.
+
+### K44 — Sandbox pengerjaan session ini ternyata punya PostgreSQL 16 terpasang TANPA Docker
+Asumsi awal (lihat riwayat sesi/PR sebelumnya): Epik 5 tertahan karena laptop developer tak
+kuat menjalankan Docker. Ternyata sandbox tempat task 5.1–5.4 dikerjakan sudah punya paket
+`postgresql-16` (server, bukan cuma `psql` client) terpasang lewat apt. Karena itu, task 5.1
+ditest **ujung-ke-ujung terhadap Postgres sungguhan** — bukan cuma `go vet`/mock — termasuk
+menjalankan biner `edge-api` penuh (`EDGE_STORE=postgres`) dan menggerakkan kendaraan lewat
+gerbang simulator sampai baris `vehicles_log`/`audit_logs`/`sync_outbox` benar-benar tersimpan.
+
+**Implikasi untuk developer lain:** kalau laptop dev tak kuat Docker, `apt install postgresql`
+(paket server, bukan `postgresql-client` saja) adalah alternatif yang jauh lebih ringan untuk
+Postgres LOKAL — tanpa image, tanpa container, layanan systemd biasa. Tak menggantikan Neon
+untuk sesi kerja yang memang tanpa akses shell lokal (mis. sesi cloud dengan kebijakan
+jaringan ketat, lihat catatan MCP Neon), tapi untuk sandbox/CI yang punya apt, ini pilihan
+paling murah.
+
+### K45 — CI mendapat Postgres lewat service container GitHub Actions, bukan Docker developer
+`ci.yml` job `edge-api` sekarang punya `services: postgres:16` — Postgres milik RUNNER GitHub,
+efemeral per run, dipakai untuk menjalankan migrasi goose (task 5.2) sungguhan lalu
+`go test -tags=integration ./internal/pgstore/...`. Ini BUKAN Docker di mesin siapa pun —
+developer tetap cukup `go build`/`go test` biasa (mode memory) di laptopnya; hanya CI yang
+butuh Postgres, dan CI sudah presedennya menjalankan Docker untuk publish image (13.1).
+
+**Harga:** uji integrasi pgstore TIDAK ikut jalan di `go test ./...` polos (perlu
+`-tags=integration` eksplisit) — developer yang cuma jalan `go test` biasa tak akan melihat
+kelas bug seperti K41 sampai push ke CI atau jalankan tag itu secara sadar terhadap Postgres
+lokal/dev. Diterima: memaksa integration test selalu jalan di `go test` polos berarti SETIAP
+developer mode-memory kudu punya Postgres tersambung, melanggar semangat D12 (mode memory ada
+supaya edge-api bisa dikerjakan tanpa DB).
+
+### K46 — K35 ditandai selesai: pemulihan DATA (task 3.5) dibuktikan lewat `TestVehicleDataSurvivesRestart`
+K35 mencatat "yang pulih adalah LAYANAN, bukan DATA" dan menahan status 3.5 di 🔧. Sekarang
+Epik 5 tuntas, klaim itu perlu DIBUKTIKAN, bukan diasumsikan otomatis benar hanya karena
+`pgstore` ada — repository yang salah tulis kolom pun bisa "ada" tanpa benar-benar
+menyelamatkan data.
+
+Buktinya: `TestVehicleDataSurvivesRestart` (`internal/pgstore/integration_test.go`) —
+kendaraan `CreateDraft`+`CommitInPremises` (persis di tengah sesi, bukan saat lahan kosong)
+lewat `Store` pertama, `Store` itu DIBUANG sepenuhnya (bukan cuma di-`Close`, benar-benar tak
+disentuh lagi), `Store` KEDUA dibuat dari `pool` yang sama meniru proses `edge-api` yang mati
+lalu naik lagi, lalu `Lookup`+`Complete` lewat `Store` kedua harus berhasil seolah tak pernah
+ada restart. Kalau ini lolos hanya karena `s1`/`s2` berbagi closure Go (bukan benar-benar lewat
+DB), itu bukan bukti — makanya `s1` sengaja tak dipakai lagi setelah baris commit.
+
+**Yang TETAP tidak berubah, sengaja:** mode `EDGE_STORE=memory` (bawaan, D12) MASIH kehilangan
+semua data saat restart — itu bukan bug yang "ketinggalan diperbaiki", itu memang sifat
+in-memory yang disengaja untuk demo/simulator. Klaim "data pulih" HANYA berlaku untuk mode
+postgres, dan dokumen ini menegaskannya eksplisit supaya tak ada yang membaca 3.5 ✅ sebagai
+"restart selalu aman" tanpa syarat.
+
+*Sumber: `internal/pgstore/integration_test.go` (`TestVehicleDataSurvivesRestart`).*
+
+*Sumber: `internal/pgstore/`, `internal/gatesvc/store.go`, `internal/audit/chain.go`
+(`Next`/`Commit`), `internal/outbox/pg.go`, `db/migrations/00006_ticket_sequence.sql`,
+`db/seed/dev_seed.sql`, `.github/workflows/ci.yml`.*
+
+---
+
+## 7f. Muat gerbang dari tabel `gates` — task 2.1, susulan Epik 5 (K47)
+
+### K47 — Site tanpa gerbang aktif GAGAL KERAS, tak jatuh ke `DefaultSpecs`
+`gatesvc.GateSource.LoadGates` versi `.env` (`SpecsFromConfig`) tak pernah bisa kosong — selalu
+menghasilkan tepat 2 gerbang dari `GATE_IN_*`/`GATE_OUT_*`. Versi pgx (`pgstore.LoadGates`) BISA
+kosong secara sah: site baru yang belum di-seed gerbangnya. Godaan pertama: jatuhkan ke
+`DefaultSpecs()` (2 gerbang simulator) supaya lahan tetap "bisa jalan". Ditolak.
+
+**Alasan:** lahan yang gagal start karena lupa seed gerbang adalah kegagalan yang JELAS — muncul
+di log startup, operator langsung tahu ada yang salah. Lahan yang diam-diam jalan dengan 2
+gerbang simulator karena tabelnya kosong adalah kegagalan SENYAP — semua terlihat baik-baik saja
+sampai ada yang bertanya kenapa GATE-IN-02 yang seharusnya ada tak pernah muncul di dashboard.
+Pola yang sama dengan K18 (code kembar menghentikan startup) dan K39 — konfigurasi yang salah
+lebih baik menghentikan startup daripada melayani dengan asumsi diam-diam.
+
+**Harga:** deploy pertama ke site baru WAJIB `db/seed/dev_seed.sql`-serupa (atau INSERT manual ke
+`gates`) dijalankan LEBIH DULU sebelum `EDGE_STORE=postgres` bisa naik — satu langkah ekstra
+dibanding mode memory yang selalu langsung jalan tanpa seed apa pun.
+
+*Sumber: `internal/pgstore/gates.go`, `internal/pgstore/integration_test.go` (`TestLoadGates`).*
+
+---
+
+## 7g. Rekonsiliasi shift — task 7.4 (K48–K49)
+
+### K48 — Satu shift terbuka per site ditegakkan lewat unique index DB, bukan cek app-level
+`OpenShift` awalnya digoda ditulis sebagai "SELECT ada shift OPEN? kalau tidak, INSERT" — pola
+yang sama persis dengan yang sudah ditolak di K30/K39 untuk kasus lain: ada celah balapan
+antara SELECT dan INSERT, dua permintaan buka-shift konkuren (mis. dua tab dashboard yang sama)
+bisa dua-duanya lolos pemeriksaan sebelum salah satu sempat menulis.
+
+Diselesaikan dengan `CREATE UNIQUE INDEX idx_shifts_one_open ON shifts (site_id) WHERE status =
+'OPEN'` (migrasi 00007) — constraint parsial Postgres, hanya berlaku pada baris `status='OPEN'`.
+`OpenShift` di kode tinggal INSERT langsung; pelanggaran diterjemahkan jadi pesan yang jelas
+("sudah ada shift terbuka"), bukan diteruskan sebagai error SQL mentah ke pemanggil.
+
+`CloseShift` sendiri mengunci baris shift (`SELECT ... FOR UPDATE`) di dalam transaksi sebelum
+menghitung total — supaya dua permintaan tutup-shift konkuren atas shift YANG SAMA tak
+dua-duanya lolos pemeriksaan "status masih OPEN".
+
+**Penyimpangan dari memstore:** `pgstore.CloseShift` menulis entri audit `SHIFT_VARIANCE`
+(severity tergantung `sites.cash_variance_threshold`, §6.4) saat selisih ≠ 0; `memstore` tidak
+— pola yang sama seperti K42 (Settle/Fail): memstore tak pernah pura-pura menyimpan sesuatu
+yang datanya toh hilang saat proses mati, sedangkan Postgres punya `audit_logs` sungguhan untuk
+ini. "Interface identik" (task 7.4 mengikuti pola 5.1) berarti kontraknya sama, bukan bahwa
+implementasi memory-yang-disederhanakan mendikte seberapa lengkap implementasi Postgres boleh.
+
+### K49 — `ids.NewV7()[:8]` BUKAN pengenal unik untuk fixture test yang jalan cepat berturutan ⚠️
+Ditemukan lewat tabrakan **nyata**, bukan tinjauan kode: dua eksekusi `go test -tags=integration`
+yang berjarak ~25 detik menghasilkan `node_id` teks IDENTIK (`it-node-01a0144c`) untuk dua
+tenant yang sama sekali berbeda. Akibatnya `TestAuditChainSurvivesRestart` menghitung 5 entri
+audit, bukan 4 — entri dari test run SEBELUMNYA (tenant lain, node_id teks sama) ikut terhitung.
+
+Sebab: UUIDv7 = 48-bit timestamp milidetik di depan, lalu bit acak. 8 karakter heksa PERTAMA
+adalah bit TINGGI dari 48-bit itu — berubah hanya tiap 2^16 milidetik ≈ **65,5 detik**. Dua
+pemanggilan `ids.NewV7()` dalam jendela waktu itu punya `[:8]` yang SAMA PERSIS, bukan hampir
+tak mungkin sama seperti asumsi awal (yang cocok untuk UUID acak biasa, salah untuk UUIDv7).
+
+Ini BUKAN bug di kode produksi — `pgstore.New`/`Record`/`AuditEntries` men-scope query murni
+lewat `node_id` (tanpa `tenant_id`) dengan SENGAJA, karena `node_id` sungguhan (dari `.env`
+`NODE_ID`) memang unik per perangkat fisik di dunia nyata; itu benar. Bug-nya di test helper
+(`openTestStore`, `internal/pgstore/integration_test.go`) yang memakai pola sama untuk
+menghasilkan kode/uid pendek "acak" demi keterbacaan. Diperbaiki: ambil 8 karakter TERAKHIR
+UUIDv7 (`rand_b`, genuinely acak, tak terikat waktu) lewat helper `shortRandom()`, bukan 8
+pertama. Dibuktikan dengan menjalankan suite dua kali berturut dalam <30 detik — lolos.
+
+**Kenapa tak pernah ketahuan sebelumnya (5.1–2.1):** kebetulan tak pernah ada dua eksekusi
+`go test -tags=integration` yang menulis ke `audit_logs` dengan node_id kolisi DAN saling
+tumpang tindih jendela waktunya sampai task 7.4 menambah test ke-6 yang dijalankan berulang
+untuk debugging. Bukan berarti bug itu baru lahir di sini — ia laten sejak K39–K47.
+
+**Temuan susulan:** cleanup test yang mencoba `DELETE FROM audit_logs` SELALU gagal diam-diam
+(kesalahan dibuang lewat `_, _ = pool.Exec(...)`) karena trigger append-only (P5) menolak
+DELETE apa pun — termasuk dari test. Baris audit uji menumpuk permanen di DB dev; tak masalah
+untuk korektnas (di-scope `node_id` acak per run, sekarang benar-benar acak), cuma menumpuk di
+database sandbox lokal. Baris `DELETE FROM audit_logs` di cleanup dihapus, diganti komentar
+penjelasan — mencoba menghapus tabel append-only dari test pun seharusnya tak pernah ada,
+bukan cuma "gagal tanpa berdampak".
+
+*Sumber: `internal/pgstore/integration_test.go` (`shortRandom`, `openTestStore`).*
+
+---
+
+## 7h. Klien gRPC nyata ke lpr-svc — task 6.1 (K50)
+
+### K50 — Stub Go DI-COMMIT, stub Python TIDAK — dua konvensi berbeda, sengaja
+Kode yang di-generate `protoc` (Go: `internal/lpr/lprpb/*.pb.go`) masuk repo apa adanya; kode
+yang di-generate `grpc_tools.protoc` (Python: `lpr_svc/lpr_pb2*.py`) sudah lebih dulu ada di
+`.gitignore` sebelum task ini dimulai — konvensi itu dipertahankan, bukan diciptakan di sini.
+
+Konsekuensinya: CI **harus** menjalankan langkah generate sebelum `pytest` bisa mengimpor
+`lpr_svc.server` sama sekali (import `lpr_pb2`/`lpr_pb2_grpc` di level modul). Ini gampang
+lolos tanpa ketahuan kalau tak diperiksa — sebelum task ini, `ci.yml` cuma `pip install
+pytest` (mengabaikan `requirements.txt`) dan tak pernah menyentuh apa pun yang butuh `grpc`
+sama sekali, jadi kelalaian ini akan lolos sampai suatu hari ada yang menambah test yang
+mengimpor `server.py` tanpa generate dulu — dan gagal secara membingungkan (`ModuleNotFoundError:
+lpr_pb2`) jauh dari akar sebabnya. Diperbaiki sekalian: `ci.yml` sekarang `pip install -r
+requirements.txt` (bukan cuma `pytest`) + `./gen_proto.sh` sebelum test.
+
+`gen_proto.sh` bukan sekadar pembungkus `protoc` — plugin Python `grpc_tools.protoc` menulis
+`import lpr_pb2 as lpr__pb2` (absolut) di `lpr_pb2_grpc.py`, yang gagal begitu `lpr_svc`
+dipakai sebagai PAKET (`python -m lpr_svc.server`, persis cara `Dockerfile` menjalankannya)
+alih-alih dieksekusi langsung dari direktorinya. Tak ada opsi command-line untuk memintanya
+menulis import relatif (`from . import lpr_pb2`) — jadi skrip ini menambalnya lewat `sed`
+sekali, di satu tempat, bukan tiap developer menambal manual dan lupa mendokumentasikannya.
+
+**Yang dibuktikan task ini, dan yang TIDAK:** transportnya (gRPC, framing, serialisasi
+protobuf) nyata dan teruji lewat proses Python sungguhan — bukan mock di kedua sisi.
+"Kecerdasan" di baliknya (model YOLOv8n/EasyOCR) tetap placeholder (`raw_text=""`,
+`confidence=0.0`, selalu `UNREAD`) sampai task 6.2 — pembagian scope itu sengaja, bukan
+kelalaian: 6.1 cuma diminta transportnya, 6.2 modelnya.
+
+*Sumber: `internal/lpr/grpc.go`, `internal/lpr/lprpb/`, `services/lpr-svc/lpr_svc/server.py`,
+`services/lpr-svc/gen_proto.sh`, `services/lpr-svc/tests/test_server.py`,
+`.github/workflows/ci.yml`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -494,9 +752,13 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 ### Utang teknis yang diketahui
 
-- **Tak ada lapisan basis data di `edge-api`.** Tak ada pgx di `go.mod`; `config.Store` menyebut
-  `memory|postgres` tapi hanya `memory` yang jalan. Memblokir Epik 5 (kecuali 5.5) dan bagian "muat
-  gerbang dari DB" pada task 2.1. `gatesvc.GateSource` adalah tempat sambungnya.
+- ~~Tak ada lapisan basis data di `edge-api`~~ **SELESAI task 5.1–5.4** — `internal/pgstore`
+  menggantikan `memstore` lewat `EDGE_STORE=postgres`, diuji terhadap Postgres 16 sungguhan
+  (K39–K45). Yang MASIH belum tersambung ke DB: "muat daftar gerbang dari tabel `gates`" pada
+  task 2.1 — `gatesvc.GateSource` masih baca dari `.env`/config statis, bukan query DB, walau
+  tabelnya sudah ada & terisi lewat seed (K44). Itu task terpisah, bukan bagian 5.1–5.4.
+- **`AuditEntries`/`VerifyChain` pgstore scan penuh tanpa jendela** (K43) — isu skala terbuka
+  untuk lahan berumur sangat panjang, bukan bug, tapi juga bukan sudah "selesai selamanya".
 - **Printer tiket belum punya adapter konkret** (H1). Gerbang masuk nyata memakai printer
   tersimulasi, diumumkan lewat `Runner.Disimulasikan()`, `/api/v1/gates`, dan status kesehatan
   `degraded` (K26) — perangkat palsu di jalur produksi tidak pernah tersamar sebagai sungguhan (P3).
@@ -509,6 +771,11 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-18 | K50 ditambahkan (task 6.1 — klien gRPC nyata ke lpr-svc; server Python dari placeholder jadi benar-benar serve; CI diperbaiki menyentuh grpc sama sekali). |
+| 2026-08-18 | K48–K49 ditambahkan (task 7.4 — rekonsiliasi shift; K49 menemukan bug fixture ID test lewat tabrakan nyata, bukan tinjauan kode). |
+| 2026-08-18 | K47 ditambahkan (task 2.1 — muat gerbang dari tabel `gates`, susulan Epik 5). |
+| 2026-08-16 | K46 ditambahkan (task 3.5 — pemulihan DATA dibuktikan `TestVehicleDataSurvivesRestart`; K35 ditandai selesai lewat addendum, bukan ditimpa). |
+| 2026-08-16 | K39–K45 ditambahkan (task 5.1–5.4 — repository pgx, diuji terhadap Postgres 16 sungguhan tanpa Docker). Utang teknis "tak ada lapisan basis data" ditandai selesai. |
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
 | 2026-08-13 | K38 ditambahkan (task 3.6 — chaos test menemukan LOCKED_NO_PAPER buntu). |
 | 2026-08-13 | K35–K37 ditambahkan (task 3.5 — pemulihan, palang yatim, urutan perangkaian). |

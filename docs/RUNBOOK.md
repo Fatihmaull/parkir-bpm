@@ -63,14 +63,25 @@ Login Cloud: `admin@parkir.local` / `admin12345`. Transaksi Edge tereplikasi ke 
 
 ---
 
-## 3. Menjalankan — Mode PostgreSQL (produksi, perlu Docker)
+## 3. Menjalankan — Mode PostgreSQL (task 5.1–5.4, TAK butuh Docker)
+
+Postgres-nya boleh dari mana saja yang bisa dijangkau `EDGE_DATABASE_URL` — Docker compose di
+bawah cuma SATU opsi. Alternatif tanpa Docker sama-sama berhasil: `apt install postgresql`
+lokal, atau Postgres cloud dev (mis. Neon, `sslmode=require`) — lihat CATATAN_KEPUTUSAN.md K44.
 
 ```bash
-cp .env.example .env       # isi kredensial
-docker compose up -d edge-db cloud-db
+cp .env.example .env       # isi kredensial + EDGE_DATABASE_URL (lihat komentar di dalamnya)
+docker compose up -d edge-db cloud-db   # ATAU: postgres lokal via apt, ATAU Postgres cloud dev
 goose -dir db/migrations postgres "$EDGE_DATABASE_URL" up
-psql "$EDGE_DATABASE_URL" -f db/grants.sql   # append-only audit_logs
-# jalankan dengan EDGE_STORE=postgres (repository pgx — lihat §6 status)
+psql "$EDGE_DATABASE_URL" -f db/grants.sql        # append-only audit_logs
+psql "$EDGE_DATABASE_URL" -f db/seed/dev_seed.sql # data dev multi-lahan/multi-gerbang (opsional)
+EDGE_STORE=postgres go run ./cmd/edge-api         # repository pgx (internal/pgstore)
+```
+
+Uji integrasi repository (`internal/pgstore`, terhadap Postgres sungguhan, bukan mock):
+
+```bash
+EDGE_DATABASE_URL="$EDGE_DATABASE_URL" go test -tags=integration ./internal/pgstore/...
 ```
 
 ---
@@ -168,10 +179,11 @@ Terakhir diukur: **2,01 dtk** terburuk dari 5 putaran (batas 15 dtk), didominasi
 > semua controller menyambung berarti satu kabel tercabut menahan seluruh lahan. Status
 > controller dibaca terpisah dari `/api/v1/health`.
 
-> **Yang pulih adalah LAYANAN, bukan DATA.** Selama `edge-api` memakai `memstore`, restart
-> menghapus seluruh kendaraan yang berada di dalam lahan — kendaraan yang masuk sebelum
-> restart tak akan dikenali saat keluar. Persistensi adalah task 5.1 (terblokir Docker).
-> Lihat K35 di [`CATATAN_KEPUTUSAN.md`](CATATAN_KEPUTUSAN.md).
+> **Yang pulih adalah LAYANAN, bukan DATA — tapi hanya kalau `EDGE_STORE=memory`.** Mode
+> memory (D12, bawaan) tetap menghapus seluruh kendaraan di dalam lahan saat restart. Mode
+> `EDGE_STORE=postgres` (task 5.1, §3 di atas) memakai `internal/pgstore` — data BERTAHAN
+> lintas restart karena tersimpan di Postgres, bukan di memori proses. Lihat K35 & K39–K45 di
+> [`CATATAN_KEPUTUSAN.md`](CATATAN_KEPUTUSAN.md).
 
 ---
 
@@ -223,8 +235,9 @@ semua event berlabel `gate_code`.
 > gerbang bertransport `tcp` belum dikerjakan.
 
 **Tertahan blocker (bukan pekerjaan logika):**
-- Repository **pgx** + validasi migrasi → butuh Docker/PostgreSQL berjalan. Selama ini belum ada,
-  `edge-api` berjalan sepenuhnya in-memory dan daftar gerbang dibaca dari `.env`, bukan tabel `gates`.
+- ~~Repository pgx + validasi migrasi → butuh Docker/PostgreSQL~~ **SELESAI task 5.1–5.4**
+  (§3 di atas, K39–K45) — TERNYATA tak butuh Docker sama sekali. Yang masih tersisa: daftar
+  gerbang masih dibaca dari `.env`, bukan tabel `gates` (bagian dari task 2.1, terpisah dari 5.1–5.4).
 - **LPR** transport gRPC nyata + model YOLOv8/EasyOCR → Fase 2 (protoc + model).
 - **EDC/JTMO fisik**, **firmware controller**, **kamera** → pihak ketiga (§1.3, Fase 1b).
 - **PG nyata (Midtrans/Xendit)**, **DigitalOcean**, **Cloudflare Tunnel** → sumber daya klien.

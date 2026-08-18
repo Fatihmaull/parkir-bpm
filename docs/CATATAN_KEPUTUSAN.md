@@ -689,6 +689,41 @@ bukan cuma "gagal tanpa berdampak".
 
 ---
 
+## 7h. Klien gRPC nyata ke lpr-svc — task 6.1 (K50)
+
+### K50 — Stub Go DI-COMMIT, stub Python TIDAK — dua konvensi berbeda, sengaja
+Kode yang di-generate `protoc` (Go: `internal/lpr/lprpb/*.pb.go`) masuk repo apa adanya; kode
+yang di-generate `grpc_tools.protoc` (Python: `lpr_svc/lpr_pb2*.py`) sudah lebih dulu ada di
+`.gitignore` sebelum task ini dimulai — konvensi itu dipertahankan, bukan diciptakan di sini.
+
+Konsekuensinya: CI **harus** menjalankan langkah generate sebelum `pytest` bisa mengimpor
+`lpr_svc.server` sama sekali (import `lpr_pb2`/`lpr_pb2_grpc` di level modul). Ini gampang
+lolos tanpa ketahuan kalau tak diperiksa — sebelum task ini, `ci.yml` cuma `pip install
+pytest` (mengabaikan `requirements.txt`) dan tak pernah menyentuh apa pun yang butuh `grpc`
+sama sekali, jadi kelalaian ini akan lolos sampai suatu hari ada yang menambah test yang
+mengimpor `server.py` tanpa generate dulu — dan gagal secara membingungkan (`ModuleNotFoundError:
+lpr_pb2`) jauh dari akar sebabnya. Diperbaiki sekalian: `ci.yml` sekarang `pip install -r
+requirements.txt` (bukan cuma `pytest`) + `./gen_proto.sh` sebelum test.
+
+`gen_proto.sh` bukan sekadar pembungkus `protoc` — plugin Python `grpc_tools.protoc` menulis
+`import lpr_pb2 as lpr__pb2` (absolut) di `lpr_pb2_grpc.py`, yang gagal begitu `lpr_svc`
+dipakai sebagai PAKET (`python -m lpr_svc.server`, persis cara `Dockerfile` menjalankannya)
+alih-alih dieksekusi langsung dari direktorinya. Tak ada opsi command-line untuk memintanya
+menulis import relatif (`from . import lpr_pb2`) — jadi skrip ini menambalnya lewat `sed`
+sekali, di satu tempat, bukan tiap developer menambal manual dan lupa mendokumentasikannya.
+
+**Yang dibuktikan task ini, dan yang TIDAK:** transportnya (gRPC, framing, serialisasi
+protobuf) nyata dan teruji lewat proses Python sungguhan — bukan mock di kedua sisi.
+"Kecerdasan" di baliknya (model YOLOv8n/EasyOCR) tetap placeholder (`raw_text=""`,
+`confidence=0.0`, selalu `UNREAD`) sampai task 6.2 — pembagian scope itu sengaja, bukan
+kelalaian: 6.1 cuma diminta transportnya, 6.2 modelnya.
+
+*Sumber: `internal/lpr/grpc.go`, `internal/lpr/lprpb/`, `services/lpr-svc/lpr_svc/server.py`,
+`services/lpr-svc/gen_proto.sh`, `services/lpr-svc/tests/test_server.py`,
+`.github/workflows/ci.yml`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -736,6 +771,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-18 | K50 ditambahkan (task 6.1 — klien gRPC nyata ke lpr-svc; server Python dari placeholder jadi benar-benar serve; CI diperbaiki menyentuh grpc sama sekali). |
 | 2026-08-18 | K48–K49 ditambahkan (task 7.4 — rekonsiliasi shift; K49 menemukan bug fixture ID test lewat tabrakan nyata, bukan tinjauan kode). |
 | 2026-08-18 | K47 ditambahkan (task 2.1 — muat gerbang dari tabel `gates`, susulan Epik 5). |
 | 2026-08-16 | K46 ditambahkan (task 3.5 — pemulihan DATA dibuktikan `TestVehicleDataSurvivesRestart`; K35 ditandai selesai lewat addendum, bukan ditimpa). |

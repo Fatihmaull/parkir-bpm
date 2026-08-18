@@ -101,9 +101,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install pytest
-        run: pip install pytest
-      - name: Test (normalisasi plat §7.1)
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Generate stub gRPC (task 6.1, lihat gen_proto.sh)
+        run: ./gen_proto.sh
+      - name: Test (normalisasi plat §7.1, server gRPC task 6.1)
         run: python -m pytest -q
 
   dashboard-web:

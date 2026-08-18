@@ -124,7 +124,24 @@ terhadap Postgres SUNGGUHAN secara lokal, bukan cuma `go vet`. Lihat CATATAN_KEP
 - ✅ 5.5 Skema DDL + memstore in-memory (v2).
 
 ## EPIK 6 — LPR / OCR (Dev A)
-- ⬜ 6.1 Klien gRPC nyata ke `lpr-svc` (butuh protoc + stub).
+- ✅ 6.1 Klien gRPC nyata ke `lpr-svc`. Stub Go di-generate dari `proto/lpr.proto`
+  (`protoc`+`protoc-gen-go`+`protoc-gen-go-grpc` → `internal/lpr/lprpb`, DI-COMMIT — beda
+  dari sisi Python) dan diimpor `internal/lpr/grpc.go` (`lpr.GRPC`, memenuhi `Recognizer`).
+  Sisi Python: `lpr_svc/server.py` sebelumnya cuma print pesan (`TODO Minggu 2`) — sekarang
+  benar-benar `grpc.server` yang bind & serve, stub-nya di-generate `gen_proto.sh` (SENGAJA
+  tak di-commit, `.gitignore`) supaya tak basi terhadap proto. `main.go`: mode postgres
+  mencoba `lpr.NewGRPC(cfg.LPRAddr)`, jatuh ke `lpr.Degraded` (UNREAD) kalau gagal — P2, LPR
+  tak pernah jadi gerbang keputusan atau dependensi keras startup.
+  "Kecerdasan" di baliknya (YOLOv8n/EasyOCR) TETAP placeholder — itu task 6.2 terpisah;
+  6.1 murni transport gRPC-nya, dan itu yang dibuktikan nyata: proses Python sungguhan
+  dijalankan, klien Go memanggilnya lewat gRPC beneran (bukan mock), responsnya (termasuk
+  `engine_version` dari proses server) mengalir sampai `ocr_logs` di Postgres lalu terbaca
+  balik lewat `/api/v1/ocr-logs`. Diuji: `go test -tags=integration ./internal/lpr/...`
+  (`TestGRPCRecognizeAgainstRealServer`) + `pytest` Python (`test_server.py`, server
+  in-process di port efemeral) + ujung-ke-ujung biner+proses nyata. CI: job `lpr-svc`
+  sekarang `pip install -r requirements.txt` (dulu cuma `pytest`) + `./gen_proto.sh`
+  sebelum `pytest`, supaya server gRPC beneran ikut teruji tiap push, bukan cuma
+  `normalize.py`.
 - ⬜ 6.2 Model YOLOv8n + EasyOCR/Tesseract di `lpr-svc` (Fase 2).
 - ⬜ 6.3 Trigger snapshot RTSP per gerbang; tulis `ocr_logs` + komparasi foto keluar.
 - ✅ 6.4 Normalisasi plat + verdict + abstraksi Recognizer + degradasi UNREAD (v2).

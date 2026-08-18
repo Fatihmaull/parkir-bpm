@@ -104,10 +104,25 @@ func run() error {
 	}
 
 	// Recognizer: mode demo memakai Stub berlabel (BUKAN model nyata; YOLOv8/EasyOCR = Fase 2, §17).
-	// Produksi menyuntik klien gRPC ke lpr-svc via LPR_GRPC_ADDR.
+	// Produksi (postgres) menyuntik klien gRPC nyata ke lpr-svc (task 6.1) via LPR_GRPC_ADDR.
+	//
+	// grpc.NewClient tak memblokir menunggu lpr-svc hidup (lazy connect, lihat lpr.NewGRPC) —
+	// jadi "berhasil di sini" hanya berarti alamatnya sah, BUKAN bahwa lpr-svc benar-benar
+	// menjawab. Itu memang benar: edge-api tak boleh menunggu layanan lain sebelum melayani
+	// gerbang (P1/P2). Kalau lpr-svc mati saat RPC pertama, gatesvc.runLPR sudah menurunkannya
+	// jadi UNREAD sendiri — GRPC di sini tak perlu (dan sengaja tak) berpura-pura sehat.
 	var rec lpr.Recognizer = lpr.Stub{Plate: "D1234ABC", Confidence: 0.91, EngineVersion: "stub-demo-no-model"}
 	if cfg.Store == "postgres" { // proxy: mode produksi → jangan palsukan OCR
-		rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
+		g, err := lpr.NewGRPC(cfg.LPRAddr)
+		if err != nil {
+			slog.Warn("lpr: gagal menyiapkan klien gRPC, jatuh ke degradasi UNREAD",
+				"addr", cfg.LPRAddr, "err", err)
+			rec = lpr.Degraded{EngineVersion: cfg.LPREngineVer}
+		} else {
+			defer g.Close()
+			rec = g
+			slog.Info("lpr: klien gRPC disiapkan", "addr", cfg.LPRAddr)
+		}
 	}
 	svc, err := gatesvc.New(gatesvc.Config{
 		NodeID: cfg.NodeID, TenantID: cfg.TenantCode, SiteID: cfg.SiteCode,

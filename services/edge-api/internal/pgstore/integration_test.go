@@ -165,6 +165,59 @@ func TestMemberAntiPassback(t *testing.T) {
 	}
 }
 
+// TestVehicleDataSurvivesRestart — bukti langsung untuk task 3.5/K35: kendaraan yang MASUK
+// sebelum "restart" (Store lama dibuang, Store baru dibuat dari pool yang sama, meniru proses
+// edge-api yang benar-benar mati lalu naik lagi) harus tetap DIKENALI saat keluar. Dengan
+// memstore ini MUSTAHIL lolos — datanya cuma ada di memori proses yang sudah tak ada lagi.
+// Dengan pgstore, tak ada apa pun yang perlu "dipulihkan" — datanya tak pernah hilang.
+func TestVehicleDataSurvivesRestart(t *testing.T) {
+	s1, h, cleanup := openTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Kendaraan masuk & DI TENGAH SESI (di dalam lahan) saat "restart" terjadi — skenario
+	// persis yang diuji di 3.5: bukan restart saat lahan kosong.
+	txID, err := s1.CreateDraft(ctx)
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	code, _ := s1.Next()
+	if err := s1.CommitInPremises(ctx, txID, code, "D9999RS", ""); err != nil {
+		t.Fatalf("CommitInPremises: %v", err)
+	}
+
+	// "Restart": s1 dibuang sepenuhnya (tak dipakai lagi), Store baru dibuat dari pool yang
+	// sama seperti main.go akan lakukan saat proses edge-api naik lagi. Tak ada state apa pun
+	// yang dioper manual dari s1 ke s2 — kalau tes ini lolos HANYA karena s2 "mewarisi" s1
+	// lewat closure Go, itu bukan bukti apa pun; makanya s1 sengaja tak disentuh lagi setelah
+	// baris ini.
+	s2, err := New(ctx, h.pool, h.tenantCode, h.siteCode, h.nodeID)
+	if err != nil {
+		t.Fatalf("New (simulasi restart): %v", err)
+	}
+
+	found, err := s2.Lookup(ctx, gate.LookupKey{Ticket: code})
+	if err != nil {
+		t.Fatalf("Lookup pasca-restart: %v", err)
+	}
+	if !found.Found || found.ID != txID {
+		t.Fatalf("kendaraan yang masuk SEBELUM restart harus tetap dikenali SESUDAHNYA — "+
+			"inilah persis yang gagal di memstore (K35). Lookup: %+v", found)
+	}
+
+	// Kendaraan itu harus bisa KELUAR normal lewat Store yang baru — bukan cuma "terlihat".
+	if err := s2.Complete(ctx, txID, 5000, "D9999RS", nil); err != nil {
+		t.Fatalf("Complete pasca-restart: %v", err)
+	}
+	gone, err := s2.Lookup(ctx, gate.LookupKey{Ticket: code})
+	if err != nil {
+		t.Fatalf("Lookup setelah Complete: %v", err)
+	}
+	if gone.Found {
+		t.Fatal("kendaraan yang sudah Complete semestinya tak lagi IN_PREMISES")
+	}
+}
+
 // TestAuditChainSurvivesRestart — Record menegakkan rantai lewat "restart" proses: New()
 // kedua atas tenant/site/node yang sama harus melanjutkan seq dari DB, bukan mulai dari
 // genesis lagi (kalau tidak, baris berikutnya akan membentur UNIQUE(node_id,seq) atau —

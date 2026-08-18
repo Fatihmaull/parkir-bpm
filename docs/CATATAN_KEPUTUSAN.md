@@ -400,6 +400,12 @@ yang terblokir Docker. Menuliskannya di sini supaya "NFR-2.3 terpenuhi" tidak pe
 sebagai "restart itu aman bagi transaksi berjalan" — dua hal yang sangat berbeda, dan
 selisihnya adalah uang pelanggan.
 
+> **Update 2026-08-16 — SELESAI.** Epik 5 tuntas (ternyata tak butuh Docker, lihat K44) dan
+> pemulihan DATA kini terbukti untuk `EDGE_STORE=postgres` — lihat K46. Paragraf di atas
+> dibiarkan apa adanya (bukan dihapus) karena mendokumentasikan keadaan yang BENAR pada
+> saat ditulis; §5.4 kredo dokumen ini adalah rekaman keputusan, bukan status hidup. Yang
+> berubah dicatat sebagai entri baru (K46), bukan menimpa yang lama.
+
 ### K36 — Palang yang ditinggalkan proses sebelumnya ditutup saat startup ⚠️
 Relay controller mempertahankan posisinya melewati matinya edge-api. Proses yang mati saat
 palang terangkat meninggalkan gerbang **terbuka selamanya**: proses baru memulai state
@@ -466,7 +472,7 @@ Tiga jalan keluar ditambahkan:
 
 ---
 
-## 7e. Persistensi pgx — task 5.1–5.4 (K39–K45)
+## 7e. Persistensi pgx — task 5.1–5.4 (K39–K46)
 
 ### K39 — tenant_id/site_id diikat SEKALI di konstruksi `pgstore.New`, bukan per-panggilan
 `gate.Store`/`gate.ExitStore`/dst. tak punya parameter tenant_id sama sekali — kontraknya
@@ -572,6 +578,28 @@ lokal/dev. Diterima: memaksa integration test selalu jalan di `go test` polos be
 developer mode-memory kudu punya Postgres tersambung, melanggar semangat D12 (mode memory ada
 supaya edge-api bisa dikerjakan tanpa DB).
 
+### K46 — K35 ditandai selesai: pemulihan DATA (task 3.5) dibuktikan lewat `TestVehicleDataSurvivesRestart`
+K35 mencatat "yang pulih adalah LAYANAN, bukan DATA" dan menahan status 3.5 di 🔧. Sekarang
+Epik 5 tuntas, klaim itu perlu DIBUKTIKAN, bukan diasumsikan otomatis benar hanya karena
+`pgstore` ada — repository yang salah tulis kolom pun bisa "ada" tanpa benar-benar
+menyelamatkan data.
+
+Buktinya: `TestVehicleDataSurvivesRestart` (`internal/pgstore/integration_test.go`) —
+kendaraan `CreateDraft`+`CommitInPremises` (persis di tengah sesi, bukan saat lahan kosong)
+lewat `Store` pertama, `Store` itu DIBUANG sepenuhnya (bukan cuma di-`Close`, benar-benar tak
+disentuh lagi), `Store` KEDUA dibuat dari `pool` yang sama meniru proses `edge-api` yang mati
+lalu naik lagi, lalu `Lookup`+`Complete` lewat `Store` kedua harus berhasil seolah tak pernah
+ada restart. Kalau ini lolos hanya karena `s1`/`s2` berbagi closure Go (bukan benar-benar lewat
+DB), itu bukan bukti — makanya `s1` sengaja tak dipakai lagi setelah baris commit.
+
+**Yang TETAP tidak berubah, sengaja:** mode `EDGE_STORE=memory` (bawaan, D12) MASIH kehilangan
+semua data saat restart — itu bukan bug yang "ketinggalan diperbaiki", itu memang sifat
+in-memory yang disengaja untuk demo/simulator. Klaim "data pulih" HANYA berlaku untuk mode
+postgres, dan dokumen ini menegaskannya eksplisit supaya tak ada yang membaca 3.5 ✅ sebagai
+"restart selalu aman" tanpa syarat.
+
+*Sumber: `internal/pgstore/integration_test.go` (`TestVehicleDataSurvivesRestart`).*
+
 *Sumber: `internal/pgstore/`, `internal/gatesvc/store.go`, `internal/audit/chain.go`
 (`Next`/`Commit`), `internal/outbox/pg.go`, `db/migrations/00006_ticket_sequence.sql`,
 `db/seed/dev_seed.sql`, `.github/workflows/ci.yml`.*
@@ -625,6 +653,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-16 | K46 ditambahkan (task 3.5 — pemulihan DATA dibuktikan `TestVehicleDataSurvivesRestart`; K35 ditandai selesai lewat addendum, bukan ditimpa). |
 | 2026-08-16 | K39–K45 ditambahkan (task 5.1–5.4 — repository pgx, diuji terhadap Postgres 16 sungguhan tanpa Docker). Utang teknis "tak ada lapisan basis data" ditandai selesai. |
 | 2026-08-13 | Dokumen dibuat. Merangkum D1–D12, V1–V7, K1–K31 dari inisialisasi monorepo sampai task 3.3. |
 | 2026-08-13 | K38 ditambahkan (task 3.6 — chaos test menemukan LOCKED_NO_PAPER buntu). |

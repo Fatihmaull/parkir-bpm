@@ -48,7 +48,7 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 - ✅ 2.6 Logika tutup dipicu sensor (LD rising→falling) pada driver nyata — `tcpctl` tersambung ke
   `gatesvc` untuk transport `tcp`.
 
-## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A) — ✅ TUNTAS kecuali pemulihan DATA (3.5, tertahan Epik 5)
+## EPIK 3 — Ketahanan Edge / Zero-Downtime (Dev A) — ✅ TUNTAS (termasuk pemulihan DATA, 3.5)
 - ✅ 3.1 `edge-api` sebagai service systemd/Windows + watchdog — unit `Type=notify` dengan
   `WatchdogSec` (`deploy/systemd/`), NSSM + Scheduled Task untuk Windows (`deploy/windows/`),
   sd_notify di `internal/svcnotify`. Kegagalan fatal kini mematikan proses (dulu menggantung
@@ -63,12 +63,15 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
   goroutine pemilik (gerbang tersendat dilaporkan, bukan menggantungkan healthcheck);
   `GET /api/v1/gates/:code/health`, rollup `gates_status` di `/api/v1/health`, event
   `gate.health.changed` hanya saat status berubah.
-- 🔧 3.5 Pemulihan < 15 dtk (NFR-2.3). **Layanan: terpenuhi & terukur** — siklus penuh
+- ✅ 3.5 Pemulihan < 15 dtk (NFR-2.3). **Layanan: terpenuhi & terukur** — siklus penuh
   SIGTERM→berhenti→nyala→`READY=1` = **2,01 dtk** terburuk dari 5 putaran (alat ukur:
   `deploy/ukur-pemulihan.sh`). Restart di tengah transaksi diuji dan menemukan bug: palang
   yang ditinggalkan terbuka tak pernah ditutup — kini ditutup saat startup dengan bukti
-  positif loop bawah LOW (K36). **Data: BELUM** — `memstore` in-process, restart menghapus
-  seluruh kendaraan di dalam lahan. Terblokir task 5.1 (pgx). Lihat K35.
+  positif loop bawah LOW (K36). **Data: SELESAI** (menyusul Epik 5) — dengan
+  `EDGE_STORE=postgres`, kendaraan yang masuk SEBELUM restart tetap dikenali & bisa keluar
+  normal SESUDAHNYA, dibuktikan `TestVehicleDataSurvivesRestart` (`internal/pgstore`,
+  `go test -tags=integration`, terhadap Postgres sungguhan — bukan memstore, yang memang
+  masih kehilangan semuanya kalau dipakai). Lihat K35 (ditandai selesai) & K39–K46.
 - ✅ 3.6 Chaos test lahan (`gatesvc/chaos_test.go`): cabut LAN satu gerbang (lahan tetap
   melayani, P8), kertas habis (casual berhenti, member tetap masuk, D3), internet putus
   (gerbang tak tersentuh, outbox menumpuk, P1), + semua rusak sekaligus. "Edge mati" diuji

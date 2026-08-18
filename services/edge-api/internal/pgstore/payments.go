@@ -11,11 +11,15 @@ import (
 
 // ── gate.Payments ──
 
+// Begin menaut payment ke shift yang SEDANG terbuka untuk site ini (§6.4), kalau ada — lewat
+// subquery, bukan query terpisah + query lagi (satu round-trip, dan tak ada celah balapan
+// antara "baca shift terbuka" dan "tulis payment": keduanya satu statement).
 func (s *Store) Begin(ctx context.Context, txID, method string, amount int64) (string, error) {
 	id := ids.NewV7()
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO payments (id, tenant_id, site_id, vehicles_log_id, method, amount, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')`,
+		INSERT INTO payments (id, tenant_id, site_id, vehicles_log_id, method, amount, status, shift_id)
+		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING',
+			(SELECT id FROM shifts WHERE site_id = $3 AND status = 'OPEN' LIMIT 1))`,
 		id, s.tenantID, s.siteID, txID, method, amount)
 	if err != nil {
 		return "", fmt.Errorf("pgstore: Begin payment: %w", err)

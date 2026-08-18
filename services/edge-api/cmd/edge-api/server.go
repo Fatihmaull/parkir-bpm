@@ -82,6 +82,7 @@ func registerRoutes(app *fiber.App, cfg *config.Config, svc *gatesvc.Service, hu
 
 	registerDashboardRoutes(app, cfg, svc)
 	registerGateRoutes(app, svc)
+	registerShiftRoutes(app, svc)
 
 	// ── Field Monitor / mode simulator (§12.8) ──
 	//

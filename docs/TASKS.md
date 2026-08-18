@@ -133,7 +133,19 @@ terhadap Postgres SUNGGUHAN secara lokal, bukan cuma `go vet`. Lihat CATATAN_KEP
 - 🔧 7.1 Adapter EDC/JTMO fisik (menunggu unit + SDK; simulator sudah ada) (Q1/Q2).
 - ✅ 7.2 Tunai, EDC-sim, member, aturan D8 timeout≠gagal (v2).
 - ✅ 7.3 QRIS/e-wallet mint + webhook (signature+idempotensi), PG disimulasikan (v2).
-- ⬜ 7.4 Rekonsiliasi shift end-to-end + laporan (§6.4) tersambung data nyata.
+- ✅ 7.4 Rekonsiliasi shift end-to-end + laporan (§6.4) tersambung data nyata. Skema `shifts`
+  + `payments.shift_id` sudah ada sejak migrasi 00004 (belum dipakai) — logika buka/tutup/
+  hitung ditambahkan di `internal/pgstore/shifts.go` + `internal/memstore` (kontrak identik
+  lewat `gatesvc.Store`), plus `GET/POST /api/v1/shifts`, `POST /open`, `POST /{id}/close`
+  (`cmd/edge-api/shifts.go`). `payments.Begin` menaut ke shift terbuka otomatis lewat
+  subquery. Satu shift aktif per site ditegakkan unique index parsial DB (migrasi 00007),
+  bukan cek app-level (K48). Selisih ≠ 0 wajib note; di atas `sites.cash_variance_threshold`
+  → audit `critical`, di bawahnya → `warning` (pgstore saja — memstore tak audit, K48).
+  Diuji: unit test memstore (`go test ./...`) + integrasi pgstore
+  (`TestShiftReconciliation`, `go test -tags=integration`) + ujung-ke-ujung lewat biner
+  sungguhan (buka shift → HTTP 409 saat buka kedua kalinya → transaksi lewat gerbang
+  simulator → tutup shift → laporan). Ketemu bug uji nyata di luar fitur ini sendiri: lihat
+  K49 (fixture ID test tak benar-benar unik).
 
 ## EPIK 8 — Sync & Agregasi (Dev A + Dev B)
 - ✅ 8.1 Outbox transaksional + sync agent + backoff + HTTP sink (v2, e2e).

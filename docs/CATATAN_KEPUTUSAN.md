@@ -629,6 +629,66 @@ dibanding mode memory yang selalu langsung jalan tanpa seed apa pun.
 
 ---
 
+## 7g. Rekonsiliasi shift — task 7.4 (K48–K49)
+
+### K48 — Satu shift terbuka per site ditegakkan lewat unique index DB, bukan cek app-level
+`OpenShift` awalnya digoda ditulis sebagai "SELECT ada shift OPEN? kalau tidak, INSERT" — pola
+yang sama persis dengan yang sudah ditolak di K30/K39 untuk kasus lain: ada celah balapan
+antara SELECT dan INSERT, dua permintaan buka-shift konkuren (mis. dua tab dashboard yang sama)
+bisa dua-duanya lolos pemeriksaan sebelum salah satu sempat menulis.
+
+Diselesaikan dengan `CREATE UNIQUE INDEX idx_shifts_one_open ON shifts (site_id) WHERE status =
+'OPEN'` (migrasi 00007) — constraint parsial Postgres, hanya berlaku pada baris `status='OPEN'`.
+`OpenShift` di kode tinggal INSERT langsung; pelanggaran diterjemahkan jadi pesan yang jelas
+("sudah ada shift terbuka"), bukan diteruskan sebagai error SQL mentah ke pemanggil.
+
+`CloseShift` sendiri mengunci baris shift (`SELECT ... FOR UPDATE`) di dalam transaksi sebelum
+menghitung total — supaya dua permintaan tutup-shift konkuren atas shift YANG SAMA tak
+dua-duanya lolos pemeriksaan "status masih OPEN".
+
+**Penyimpangan dari memstore:** `pgstore.CloseShift` menulis entri audit `SHIFT_VARIANCE`
+(severity tergantung `sites.cash_variance_threshold`, §6.4) saat selisih ≠ 0; `memstore` tidak
+— pola yang sama seperti K42 (Settle/Fail): memstore tak pernah pura-pura menyimpan sesuatu
+yang datanya toh hilang saat proses mati, sedangkan Postgres punya `audit_logs` sungguhan untuk
+ini. "Interface identik" (task 7.4 mengikuti pola 5.1) berarti kontraknya sama, bukan bahwa
+implementasi memory-yang-disederhanakan mendikte seberapa lengkap implementasi Postgres boleh.
+
+### K49 — `ids.NewV7()[:8]` BUKAN pengenal unik untuk fixture test yang jalan cepat berturutan ⚠️
+Ditemukan lewat tabrakan **nyata**, bukan tinjauan kode: dua eksekusi `go test -tags=integration`
+yang berjarak ~25 detik menghasilkan `node_id` teks IDENTIK (`it-node-01a0144c`) untuk dua
+tenant yang sama sekali berbeda. Akibatnya `TestAuditChainSurvivesRestart` menghitung 5 entri
+audit, bukan 4 — entri dari test run SEBELUMNYA (tenant lain, node_id teks sama) ikut terhitung.
+
+Sebab: UUIDv7 = 48-bit timestamp milidetik di depan, lalu bit acak. 8 karakter heksa PERTAMA
+adalah bit TINGGI dari 48-bit itu — berubah hanya tiap 2^16 milidetik ≈ **65,5 detik**. Dua
+pemanggilan `ids.NewV7()` dalam jendela waktu itu punya `[:8]` yang SAMA PERSIS, bukan hampir
+tak mungkin sama seperti asumsi awal (yang cocok untuk UUID acak biasa, salah untuk UUIDv7).
+
+Ini BUKAN bug di kode produksi — `pgstore.New`/`Record`/`AuditEntries` men-scope query murni
+lewat `node_id` (tanpa `tenant_id`) dengan SENGAJA, karena `node_id` sungguhan (dari `.env`
+`NODE_ID`) memang unik per perangkat fisik di dunia nyata; itu benar. Bug-nya di test helper
+(`openTestStore`, `internal/pgstore/integration_test.go`) yang memakai pola sama untuk
+menghasilkan kode/uid pendek "acak" demi keterbacaan. Diperbaiki: ambil 8 karakter TERAKHIR
+UUIDv7 (`rand_b`, genuinely acak, tak terikat waktu) lewat helper `shortRandom()`, bukan 8
+pertama. Dibuktikan dengan menjalankan suite dua kali berturut dalam <30 detik — lolos.
+
+**Kenapa tak pernah ketahuan sebelumnya (5.1–2.1):** kebetulan tak pernah ada dua eksekusi
+`go test -tags=integration` yang menulis ke `audit_logs` dengan node_id kolisi DAN saling
+tumpang tindih jendela waktunya sampai task 7.4 menambah test ke-6 yang dijalankan berulang
+untuk debugging. Bukan berarti bug itu baru lahir di sini — ia laten sejak K39–K47.
+
+**Temuan susulan:** cleanup test yang mencoba `DELETE FROM audit_logs` SELALU gagal diam-diam
+(kesalahan dibuang lewat `_, _ = pool.Exec(...)`) karena trigger append-only (P5) menolak
+DELETE apa pun — termasuk dari test. Baris audit uji menumpuk permanen di DB dev; tak masalah
+untuk korektnas (di-scope `node_id` acak per run, sekarang benar-benar acak), cuma menumpuk di
+database sandbox lokal. Baris `DELETE FROM audit_logs` di cleanup dihapus, diganti komentar
+penjelasan — mencoba menghapus tabel append-only dari test pun seharusnya tak pernah ada,
+bukan cuma "gagal tanpa berdampak".
+
+*Sumber: `internal/pgstore/integration_test.go` (`shortRandom`, `openTestStore`).*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -676,6 +736,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-18 | K48–K49 ditambahkan (task 7.4 — rekonsiliasi shift; K49 menemukan bug fixture ID test lewat tabrakan nyata, bukan tinjauan kode). |
 | 2026-08-18 | K47 ditambahkan (task 2.1 — muat gerbang dari tabel `gates`, susulan Epik 5). |
 | 2026-08-16 | K46 ditambahkan (task 3.5 — pemulihan DATA dibuktikan `TestVehicleDataSurvivesRestart`; K35 ditandai selesai lewat addendum, bukan ditimpa). |
 | 2026-08-16 | K39–K45 ditambahkan (task 5.1–5.4 — repository pgx, diuji terhadap Postgres 16 sungguhan tanpa Docker). Utang teknis "tak ada lapisan basis data" ditandai selesai. |

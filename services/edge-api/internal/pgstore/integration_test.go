@@ -28,6 +28,20 @@ import (
 	"github.com/jabar-creative/parkir/edge-api/internal/ids"
 )
 
+// shortRandom mengembalikan 8 karakter hex acak untuk fixture test (code/uid dsb.) — BUKAN
+// ids.NewV7()[:8]. 8 karakter pertama UUIDv7 adalah bit TINGGI timestamp 48-bit, jadi identik
+// untuk setiap pemanggilan dalam jendela ~65 detik yang sama (2^16 ms) — ditemukan lewat
+// tabrakan node_id NYATA antar dua eksekusi `go test` yang berdekatan (lihat CATATAN_KEPUTUSAN
+// K49): test run A menulis audit_logs dengan node_id "it-node-XXXXXXXX", test run B beberapa
+// detik kemudian memakai node_id TEKS SAMA PERSIS untuk tenant yang beda sama sekali, dan
+// query `WHERE node_id = $1` (scoping yang BENAR untuk kode produksi — node_id memang unik
+// per perangkat fisik di dunia nyata) mengambil baris dari test run yang salah. 8 karakter
+// TERAKHIR UUIDv7 (rand_b) genuinely acak, tak terikat waktu sama sekali.
+func shortRandom() string {
+	id := ids.NewV7()
+	return id[len(id)-8:]
+}
+
 type testHandles struct {
 	pool       *pgxpool.Pool
 	tenantCode string
@@ -35,6 +49,7 @@ type testHandles struct {
 	tenantID   string
 	siteID     string
 	nodeID     string
+	userID     string
 }
 
 func openTestStore(t *testing.T) (*Store, testHandles, func()) {
@@ -49,11 +64,11 @@ func openTestStore(t *testing.T) (*Store, testHandles, func()) {
 		t.Fatalf("pgxpool.New: %v", err)
 	}
 
-	tenantCode := "it-" + ids.NewV7()[:8]
-	siteCode := "site-" + ids.NewV7()[:8]
+	tenantCode := "it-" + shortRandom()
+	siteCode := "site-" + shortRandom()
 	tenantID := ids.NewV7()
 	siteID := ids.NewV7()
-	nodeID := "it-node-" + ids.NewV7()[:8]
+	nodeID := "it-node-" + shortRandom()
 
 	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, code, name) VALUES ($1, $2, 'IT Tenant')`,
 		tenantID, tenantCode); err != nil {
@@ -68,6 +83,13 @@ func openTestStore(t *testing.T) (*Store, testHandles, func()) {
 		ids.NewV7(), siteID); err != nil {
 		t.Fatalf("seed tariff: %v", err)
 	}
+	userID := ids.NewV7()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id, tenant_id, email, password_hash, full_name, role)
+		VALUES ($1, $2, $3, 'x', 'IT Kasir', 'Kasir')`,
+		userID, tenantID, "it-"+shortRandom()+"@example.test"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
 
 	s, err := New(ctx, pool, tenantCode, siteCode, nodeID)
 	if err != nil {
@@ -76,18 +98,22 @@ func openTestStore(t *testing.T) (*Store, testHandles, func()) {
 
 	h := testHandles{
 		pool: pool, tenantCode: tenantCode, siteCode: siteCode,
-		tenantID: tenantID, siteID: siteID, nodeID: nodeID,
+		tenantID: tenantID, siteID: siteID, nodeID: nodeID, userID: userID,
 	}
 	cleanup := func() {
-		// Urutan mundur dari FK (audit_logs/payments/vehicles_log/tariffs/memberships/gates → sites → tenants).
-		_, _ = pool.Exec(ctx, `DELETE FROM audit_logs WHERE tenant_id = $1`, tenantID)
+		// audit_logs TIDAK dibersihkan — trigger append-only (P5) menolak DELETE apa pun,
+		// termasuk dari test. Baris audit uji tertinggal permanen di DB dev; tak masalah untuk
+		// korektnas (di-scope node_id yang acak per run, K49) — cuma numpuk di DB sandbox lokal.
+		// Urutan mundur dari FK (payments/vehicles_log/shifts/tariffs/memberships/gates → sites → tenants).
 		_, _ = pool.Exec(ctx, `DELETE FROM payments WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM vehicles_log WHERE tenant_id = $1`, tenantID)
+		_, _ = pool.Exec(ctx, `DELETE FROM shifts WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM memberships WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM tariffs WHERE site_id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM ticket_counters WHERE site_id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM devices WHERE site_id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM gates WHERE site_id = $1`, siteID)
+		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM sites WHERE id = $1`, siteID)
 		_, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenantID)
 		pool.Close()
@@ -154,7 +180,7 @@ func TestMemberAntiPassback(t *testing.T) {
 	s, _, cleanup := openTestStore(t)
 	defer cleanup()
 
-	uid := "IT-" + ids.NewV7()[:8]
+	uid := "IT-" + shortRandom()
 	if id := s.AddMember(uid, []string{"D999XX"}, "mobil", time.Now().AddDate(0, 1, 0)); id == "" {
 		t.Fatal("AddMember gagal (id kosong)")
 	}
@@ -302,5 +328,88 @@ func TestLoadGates(t *testing.T) {
 	}
 	if specs[0].Kind != gatesvc.KindEntry || specs[1].Kind != gatesvc.KindExit {
 		t.Fatalf("kind tak sesuai kolom `kind`, dapat %+v", specs)
+	}
+}
+
+// TestShiftReconciliation — task 7.4: buka shift, payment lewat metode campuran (CASH,
+// EDC_DEBIT, QRIS) otomatis tertaut ke shift yang sedang terbuka, tutup shift menghitung
+// total per metode & selisih sesuai rumus §6.4. Juga menguji tiga pagar: shift kedua tak
+// boleh dibuka selagi satu masih terbuka (unique index DB, K48), selisih ≠ 0 wajib note,
+// dan shift yang sudah tertutup tak bisa ditutup lagi.
+func TestShiftReconciliation(t *testing.T) {
+	s, h, cleanup := openTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	shiftID, err := s.OpenShift(ctx, h.userID, 100_000)
+	if err != nil {
+		t.Fatalf("OpenShift: %v", err)
+	}
+
+	if _, err := s.OpenShift(ctx, h.userID, 0); err == nil {
+		t.Fatal("OpenShift kedua selagi satu masih terbuka harus ditolak (K48)")
+	}
+
+	settle := func(method string, amount int64) {
+		t.Helper()
+		txID, err := s.CreateDraft(ctx)
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+		code, _ := s.Next()
+		if err := s.CommitInPremises(ctx, txID, code, "D-SHIFT", ""); err != nil {
+			t.Fatalf("CommitInPremises: %v", err)
+		}
+		payID, err := s.Begin(ctx, txID, method, amount)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := s.Settle(ctx, payID, gate.SettleInfo{}); err != nil {
+			t.Fatalf("Settle: %v", err)
+		}
+	}
+	settle(gate.MethodCash, 50_000)
+	settle(gate.MethodEDCDebit, 30_000)
+	settle(gate.MethodQRIS, 20_000)
+
+	// Selisih 0: dilaporkan persis kas awal + tunai sistem (100_000 + 50_000).
+	report, err := s.CloseShift(ctx, shiftID, 150_000, "")
+	if err != nil {
+		t.Fatalf("CloseShift: %v", err)
+	}
+	if report.Status != "CLOSED" {
+		t.Fatalf("selisih 0 harus CLOSED, dapat %+v", report)
+	}
+	if report.SystemCash != 50_000 || report.SystemEDC != 30_000 || report.SystemQRIS != 20_000 {
+		t.Fatalf("jumlah per metode salah: %+v", report)
+	}
+	if report.Variance == nil || *report.Variance != 0 {
+		t.Fatalf("variance harus 0, dapat %+v", report.Variance)
+	}
+
+	if _, err := s.CloseShift(ctx, shiftID, 150_000, ""); err == nil {
+		t.Fatal("menutup shift yang sudah tertutup harus gagal")
+	}
+
+	// Shift kedua: selisih ≠ 0 tanpa note harus ditolak, lalu diterima dengan note.
+	shift2, err := s.OpenShift(ctx, h.userID, 0)
+	if err != nil {
+		t.Fatalf("OpenShift kedua (setelah yang pertama tertutup): %v", err)
+	}
+	settle(gate.MethodCash, 10_000)
+	if _, err := s.CloseShift(ctx, shift2, 5_000, ""); err == nil {
+		t.Fatal("selisih != 0 tanpa note harus ditolak")
+	}
+	report2, err := s.CloseShift(ctx, shift2, 5_000, "kasir salah hitung kembalian")
+	if err != nil {
+		t.Fatalf("CloseShift dengan note: %v", err)
+	}
+	if report2.Status != "VARIANCE" || report2.Variance == nil || *report2.Variance != -5_000 {
+		t.Fatalf("selisih -5000 harus VARIANCE, dapat %+v", report2)
+	}
+
+	views := s.ShiftViews()
+	if len(views) != 2 {
+		t.Fatalf("ShiftViews harus 2 shift, dapat %d", len(views))
 	}
 }

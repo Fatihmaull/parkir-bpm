@@ -1,6 +1,7 @@
 package gatesvc
 
 import (
+	"context"
 	"time"
 
 	"github.com/jabar-creative/parkir/edge-api/internal/audit"
@@ -46,6 +47,11 @@ type Store interface {
 	// ── CRON job logic (§8.3) ──
 	ExpireMemberships(now time.Time) int
 	ResetStalePresence(now time.Time, hours int) int
+
+	// ── Rekonsiliasi shift (§6.4/§12.6, task 7.4) ──
+	OpenShift(ctx context.Context, operatorID string, openingFloat int64) (shiftID string, err error)
+	CloseShift(ctx context.Context, shiftID string, declaredCash int64, note string) (memstore.ShiftView, error)
+	ShiftViews() []memstore.ShiftView
 }
 
 var _ Store = (*memstore.Store)(nil)

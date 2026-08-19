@@ -32,8 +32,9 @@ var _ gatesvc.Store = (*Store)(nil)
 // rantai audit (in-process, lihat audit.Chain) dijaga mu terpisah karena Next/Commit-nya
 // harus berurutan ketat (P5) meski beberapa gerbang menulis audit bersamaan.
 type Store struct {
-	pool *pgxpool.Pool
-	ob   *outbox.PG
+	pool    *pgxpool.Pool
+	ob      *outbox.PG
+	auditOb *outbox.AuditPG
 
 	nodeID   string
 	tenantID string // UUID tenants.id, di-resolve dari TENANT_CODE
@@ -84,7 +85,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, tenantCode, siteCode, nodeID s
 	}
 
 	return &Store{
-		pool: pool, ob: outbox.NewPG(pool),
+		pool: pool, ob: outbox.NewPG(pool), auditOb: outbox.NewAuditPG(pool),
 		nodeID: nodeID, tenantID: tenantID, siteID: siteID,
 		chain: audit.NewChain(nodeID, lastSeq, lastHash),
 	}, nil

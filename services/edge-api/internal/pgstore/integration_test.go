@@ -104,6 +104,9 @@ func openTestStore(t *testing.T) (*Store, testHandles, func()) {
 		// audit_logs TIDAK dibersihkan — trigger append-only (P5) menolak DELETE apa pun,
 		// termasuk dari test. Baris audit uji tertinggal permanen di DB dev; tak masalah untuk
 		// korektnas (di-scope node_id yang acak per run, K49) — cuma numpuk di DB sandbox lokal.
+		// audit_sync_outbox BUKAN append-only (ia antrean operasional, bukan rantai audit itu
+		// sendiri — lihat db/migrations/00008) jadi AMAN dan MEMANG harus dibersihkan di sini.
+		_, _ = pool.Exec(ctx, `DELETE FROM audit_sync_outbox WHERE node_id = $1`, nodeID)
 		// Urutan mundur dari FK (payments/vehicles_log/shifts/tariffs/memberships/gates → sites → tenants).
 		_, _ = pool.Exec(ctx, `DELETE FROM payments WHERE tenant_id = $1`, tenantID)
 		_, _ = pool.Exec(ctx, `DELETE FROM vehicles_log WHERE tenant_id = $1`, tenantID)
@@ -289,6 +292,76 @@ func TestAuditChainSurvivesRestart(t *testing.T) {
 	}
 	if broken, ok := s2.VerifyChain(); !ok {
 		t.Fatalf("rantai gabungan harus tetap utuh lintas restart, rusak di seq %d", broken)
+	}
+}
+
+// TestAuditOutboxTransactionalWithAuditLog — task 8.5: Record() menulis audit_logs DAN
+// audit_sync_outbox dalam SATU transaksi. Menguji siklus penuh terhadap Postgres sungguhan:
+// enqueue otomatis lewat Record, fetch (urutan seq, bukan urutan id baris), mark-sent
+// menghapusnya dari antrean pending, dan mark-failed TAK PERNAH membuatnya permanen gagal.
+func TestAuditOutboxTransactionalWithAuditLog(t *testing.T) {
+	s, _, cleanup := openTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if n := s.AuditOutbox().PendingAuditCount(); n != 0 {
+		t.Fatalf("outbox harus kosong di awal, got %d", n)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := s.Record(ctx, audit.Event{
+			EventType: "TEST_OUTBOX_EVENT", Severity: audit.SevNormal,
+			ActorLabel: "test", ActorRole: "System", Summary: "uji outbox audit",
+		}); err != nil {
+			t.Fatalf("Record %d: %v", i, err)
+		}
+	}
+
+	// Tiap baris audit_logs harus punya padanan persis di audit_sync_outbox — jumlah sama,
+	// bukan cuma "outbox tak kosong" (buktikan keduanya benar-benar satu transaksi, P1/D4).
+	if n := s.AuditOutbox().PendingAuditCount(); n != 3 {
+		t.Fatalf("harus 3 item pending (satu per Record), got %d", n)
+	}
+
+	items := s.AuditOutbox().FetchPendingAudit(10)
+	if len(items) != 3 {
+		t.Fatalf("FetchPendingAudit harus 3, got %d", len(items))
+	}
+	for i, it := range items {
+		wantSeq := int64(i + 1)
+		if it.Seq != wantSeq {
+			t.Fatalf("urutan seq salah di posisi %d: got %d, want %d", i, it.Seq, wantSeq)
+		}
+		if it.Payload["event_type"] != "TEST_OUTBOX_EVENT" {
+			t.Fatalf("payload event_type hilang: %+v", it.Payload)
+		}
+		if it.Payload["current_hash"] == "" || it.Payload["current_hash"] == nil {
+			t.Fatalf("payload harus membawa current_hash untuk verifikasi rantai di Cloud: %+v", it.Payload)
+		}
+	}
+
+	// Kirim 2 dari 3 → sisa 1 pending, dan yang terkirim tak muncul lagi.
+	s.AuditOutbox().MarkAuditSent([]int64{items[0].ID, items[1].ID})
+	remaining := s.AuditOutbox().FetchPendingAudit(10)
+	if len(remaining) != 1 || remaining[0].Seq != 3 {
+		t.Fatalf("harus tersisa 1 item (seq 3), got %+v", remaining)
+	}
+
+	// MarkAuditFailed berulang TAK PERNAH memindahkan status ke FAILED permanen (beda dari
+	// outbox.PG biasa yang punya batas percobaan) — item seq 3 harus tetap muncul di
+	// FetchPendingAudit walau attempts-nya tinggi.
+	for i := 0; i < 6; i++ {
+		s.AuditOutbox().MarkAuditFailed(remaining[0].ID, "simulasi cloud tak terjangkau")
+	}
+	stillPending := s.AuditOutbox().FetchPendingAudit(10)
+	if len(stillPending) != 1 || stillPending[0].Seq != 3 {
+		t.Fatalf("item harus tetap pending setelah banyak kegagalan (retry selamanya, task 8.5): %+v", stillPending)
+	}
+	if stillPending[0].Attempts != 6 {
+		t.Fatalf("attempts harus 6, got %d", stillPending[0].Attempts)
+	}
+	if n := s.AuditOutbox().PendingAuditCount(); n != 1 {
+		t.Fatalf("PendingAuditCount harus 1, got %d", n)
 	}
 }
 

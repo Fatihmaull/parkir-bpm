@@ -87,7 +87,14 @@ Seluruhnya ada di `services/edge-api/internal/hardware/tcpctl/` (PR #1, #3).
 
 ## EPIK 4 — Peripheral Gerbang (Dev A)
 - ⬜ 4.1 Adapter Mesin Tiket Otomatis (menunggu H1: protokol/merek) — cetak QR, status kertas, jam.
-- ⬜ 4.2 Degradasi kertas habis (casual berhenti, member tetap masuk).
+- ✅ 4.2 Degradasi kertas habis (casual berhenti, member tetap masuk). Sudah terimplementasi &
+  teruji sejak Epik 4/hardware: `internal/gate/entry.go` mengunci jalur kasual saat printer
+  `PAPER_OUT`, member tetap boleh masuk (tanpa tiket cetak), dan terbuka lagi begitu kertas
+  diisi ulang — `TestPaperOutLocksCasual`, `TestPaperOutMemberTetapMasuk`,
+  `TestPaperOutPulihSetelahKertasDiisi`, `TestPaperOutKendaraanPergiMembukaKunci`
+  (`internal/gate/entry_test.go`), plus `TestChaosKertasHabis` (`internal/gatesvc/chaos_test.go`)
+  dan `TestPrinterPaperOutBlocksPrint` (`internal/hardware/sim/sim_test.go`). Diverifikasi ulang
+  lewat inspeksi kode+test (bukan diasumsikan) sebelum ditandai selesai di sini.
 - ⬜ 4.3 Integrasi scanner QR/barcode di POS keluar (USB-HID wedge / serial) (H4).
 - ✅ 4.4 Abstraksi `TicketPrinter` + degradasi (v2).
 
@@ -169,7 +176,32 @@ terhadap Postgres SUNGGUHAN secara lokal, bukan cuma `go vet`. Lihat CATATAN_KEP
 - ✅ 8.2 Cloud receiver idempoten per node (v2).
 - ⬜ 8.3 mTLS per node (FR-1.4) + Cloudflare Tunnel produksi.
 - ⬜ 8.4 Tabel `nodes` + kesehatan Edge per lahan di Pusat.
-- ⬜ 8.5 Sync audit_logs jalur terpisah (urutan seq) + verifikasi kontinuitas di Cloud.
+- ✅ 8.5 Sync audit_logs jalur terpisah (urutan seq) + verifikasi kontinuitas di Cloud.
+  Jalur TERPISAH dari 8.1 (bukan dipakaikan `sync_outbox` yang sama) — tabel `audit_sync_outbox`
+  sendiri (migrasi 00008), interface `outbox.AuditStore` sendiri, agen sync sendiri
+  (`internal/auditsync`), endpoint sendiri `POST /internal/v1/sync/audit-batch`. Alasan: satu
+  entri audit yang hilang merusak verifikasi SEMUA entri sesudahnya (beda dari vehicles_log,
+  yang hilangnya satu baris tak memengaruhi baris lain) — lihat K51.
+  `pgstore.Record` menulis `audit_logs` DAN `audit_sync_outbox` dalam SATU transaksi
+  (`internal/pgstore/audit.go`); `memstore` punya padanan in-memory
+  (`internal/memstore/auditoutbox.go`). `outbox.AuditPG.MarkAuditFailed` TAK PERNAH memindahkan
+  status ke FAILED permanen — beda sengaja dari outbox biasa (batas 5 percobaan) — retry
+  selamanya, karena celah rantai audit tak punya jalan rekonsiliasi manual sebaik data bisnis.
+  Cloud (`services/cloud-api/internal/store/audit.go`) memverifikasi ULANG setiap entri secara
+  kriptografis sebelum diterima — kontinuitas seq, sambungan `previous_hash`, dan `current_hash`
+  dihitung ulang — bukan sekadar disimpan mentah; formula hash sengaja diduplikasi dari
+  `internal/audit` (modul Go terpisah, batas layanan), didokumentasikan di komentar berkas.
+  Endpoint baru: `GET /api/v1/audit` (ringkasan kontinuitas per node, atau `?node_id=` untuk
+  entri penuh) & `POST /api/v1/audit/verify` (re-hash penuh dari genesis, on-demand §9.4),
+  menggantikan stub lama yang selalu `verified:true` tanpa memeriksa apa pun.
+  Diuji: unit `internal/memstore` + `internal/auditsync` (drain/backoff/retry-selamanya/HTTP
+  sink) + `internal/store` cloud-api (rantai kontinu diterima, celah ditolak TANPA menggerakkan
+  checkpoint, hash dimanipulasi ditolak, retry identik idempoten, retry dengan isi beda ditolak,
+  isolasi tenant) + integrasi pgstore terhadap Postgres sungguhan
+  (`TestAuditOutboxTransactionalWithAuditLog`, `go test -tags=integration`) + ujung-ke-ujung
+  lewat kedua biner sungguhan (edge-api mode memory → cloud-api): batch masuk, `/api/v1/audit`
+  & `/api/v1/audit/verify` melapor benar, dan percobaan mengirim seq yang melompat (celah)
+  ditolak tanpa memajukan checkpoint — diverifikasi langsung lewat HTTP live, bukan cuma `go test`.
 
 ## EPIK 9 — Cloud API / Pusat (Dev B)
 - ✅ 9.1 Auth login/refresh/logout, RBAC, tenant isolation, /sites, /transactions, /reports, /tariffs,

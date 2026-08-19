@@ -34,7 +34,9 @@ func registerRoutes(app *fiber.App, st *store.Store, iss *auth.Issuer) {
 	})
 
 	app.Post("/api/v1/auth/refresh", func(c *fiber.Ctx) error {
-		var b struct{ RefreshToken string `json:"refresh_token"` }
+		var b struct {
+			RefreshToken string `json:"refresh_token"`
+		}
 		if err := c.BodyParser(&b); err != nil {
 			return fiber.ErrBadRequest
 		}
@@ -65,13 +67,42 @@ func registerRoutes(app *fiber.App, st *store.Store, iss *auth.Issuer) {
 		return c.JSON(fiber.Map{"transactions": st.Transactions(cl.TenantID)})
 	})
 
+	// Ringkasan kontinuitas tiap rantai node (task 8.5) — bukan dump audit_logs mentah
+	// (bisa besar); ?node_id= mengembalikan entri penuh satu node untuk inspeksi/ekspor.
 	api.Get("/audit", auth.RequireRole(auth.RoleSuperAdmin, auth.RoleAuditor), func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"audit": []any{}, "note": "verifikasi rantai penuh via node; ekspor CSV menyusul"})
+		tid := cl(c).TenantID
+		if nodeID := c.Query("node_id"); nodeID != "" {
+			return c.JSON(fiber.Map{"node_id": nodeID, "entries": st.AuditEntries(tid, nodeID)})
+		}
+		return c.JSON(fiber.Map{"chains": st.AuditChains(tid)})
 	})
 
-	// Verifikasi rantai audit on-demand (§9.4). Cloud memverifikasi kontinuitas hash per node.
+	// Verifikasi rantai audit on-demand (§9.4): re-hash penuh dari genesis, terpisah dari
+	// pemeriksaan checkpoint incremental yang sudah terjadi tiap batch masuk (ApplyAuditBatch).
+	// Body: {"node_id": "..."} — kosong berarti verifikasi semua node tenant ini.
 	api.Post("/audit/verify", auth.RequireRole(auth.RoleSuperAdmin, auth.RoleAuditor), func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"verified": true, "note": "batch sync diverifikasi kontinuitasnya saat masuk (§9.4)"})
+		tid := cl(c).TenantID
+		var b struct {
+			NodeID string `json:"node_id"`
+		}
+		_ = c.BodyParser(&b)
+		nodeIDs := []string{b.NodeID}
+		if b.NodeID == "" {
+			nodeIDs = nil
+			for _, ch := range st.AuditChains(tid) {
+				nodeIDs = append(nodeIDs, ch.NodeID)
+			}
+		}
+		results := make([]fiber.Map, 0, len(nodeIDs))
+		allOK := true
+		for _, nid := range nodeIDs {
+			brokenSeq, ok, checked := st.VerifyAuditChain(tid, nid)
+			if !ok {
+				allOK = false
+			}
+			results = append(results, fiber.Map{"node_id": nid, "verified": ok, "broken_seq": brokenSeq, "checked": checked})
+		}
+		return c.JSON(fiber.Map{"verified": allOK, "chains": results})
 	})
 
 	// Tarif (§13.2) — versioned; POST membuat versi baru (tidak menimpa, D5).
@@ -122,6 +153,21 @@ func registerRoutes(app *fiber.App, st *store.Store, iss *auth.Issuer) {
 		}
 		applied, skipped := st.ApplyBatch(b.TenantID, b.Items)
 		return c.JSON(fiber.Map{"applied": applied, "skipped": skipped})
+	})
+
+	// Penerima sync audit_logs (task 8.5) — TERPISAH dari batch di atas. Tiap entri
+	// diverifikasi kriptografis (kontinuitas seq + rantai hash) sebelum diterima; lihat
+	// internal/store/audit.go. Produksi: mTLS per node, sama seperti /sync/batch.
+	app.Post("/internal/v1/sync/audit-batch", func(c *fiber.Ctx) error {
+		var b struct {
+			TenantID string           `json:"tenant_id"`
+			Entries  []map[string]any `json:"entries"`
+		}
+		if err := c.BodyParser(&b); err != nil || b.TenantID == "" {
+			return fiber.ErrBadRequest
+		}
+		res := st.ApplyAuditBatch(b.TenantID, b.Entries)
+		return c.JSON(res)
 	})
 }
 

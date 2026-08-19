@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -114,5 +117,53 @@ func TestSyncBatchIdempotent(t *testing.T) {
 	_, tm := do(t, app, "GET", "/api/v1/transactions", tok, "")
 	if len(tm["transactions"].([]any)) != 2 {
 		t.Fatalf("harus 2 transaksi ter-sync, got %v", tm["transactions"])
+	}
+}
+
+// testAuditHash — replika formula audit.computeHash (edge-api) / store.computeHash (cloud-api,
+// tak diekspor) HANYA untuk membangun payload uji yang sah lewat HTTP; lihat komentar duplikasi
+// formula di internal/store/audit.go.
+func testAuditHash(prevHash, nodeID string, seq int64, eventType, actorID, payloadJSON string, createdAt time.Time) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x1f%s\x1f%d\x1f%s\x1f%s\x1f%s\x1f%s",
+		prevHash, nodeID, seq, eventType, actorID, payloadJSON, createdAt.Format(time.RFC3339Nano))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func TestAuditBatchSyncAndVerifyEndToEnd(t *testing.T) {
+	app := testApp(t)
+	tok := login(t, app)
+
+	const genesis = "0000000000000000000000000000000000000000000000000000000000000000"
+	now := time.Now()
+	payloadJSON := `{"gate":"IN-1"}`
+	h1 := testAuditHash(genesis, "node-a", 1, "GATE_OPEN", "op-1", payloadJSON, now)
+
+	batch := fmt.Sprintf(`{"tenant_id":"t-jabar","entries":[{
+		"site_id":"s-1","node_id":"node-a","seq":1,"event_type":"GATE_OPEN","severity":"normal",
+		"actor_id":"op-1","actor_label":"Operator 1","actor_role":"Kasir","gate_label":"IN-1",
+		"summary":"buka palang","payload":%s,
+		"previous_hash":"%s","current_hash":"%s","created_at":"%s"}]}`,
+		payloadJSON, genesis, h1, now.Format(time.RFC3339Nano))
+
+	code, m := do(t, app, "POST", "/internal/v1/sync/audit-batch", "", batch)
+	if code != 200 || m["applied"].(float64) != 1 {
+		t.Fatalf("audit-batch: %d %v", code, m)
+	}
+
+	// Tanpa token → ditolak (endpoint /api/v1/audit butuh role SuperAdmin/Auditor).
+	if code, _ := do(t, app, "GET", "/api/v1/audit", "", ""); code != 401 {
+		t.Fatalf("audit tanpa token harus 401, got %d", code)
+	}
+
+	_, am := do(t, app, "GET", "/api/v1/audit", tok, "")
+	chains := am["chains"].([]any)
+	if len(chains) != 1 || chains[0].(map[string]any)["last_seq"].(float64) != 1 {
+		t.Fatalf("chains tak sesuai: %v", am)
+	}
+
+	_, vm := do(t, app, "POST", "/api/v1/audit/verify", tok, `{}`)
+	if vm["verified"] != true {
+		t.Fatalf("verifikasi rantai utuh harus true: %v", vm)
 	}
 }

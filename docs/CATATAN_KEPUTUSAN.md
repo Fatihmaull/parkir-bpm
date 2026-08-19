@@ -724,6 +724,72 @@ kelalaian: 6.1 cuma diminta transportnya, 6.2 modelnya.
 
 ---
 
+## 7i. Sync audit_logs jalur terpisah + verifikasi kontinuitas di Cloud — task 8.5 (K51)
+
+### K51 — Jalur sync audit TERPISAH sampai ke lapisan data, bukan cuma tipe Go berbeda ⚠️
+`sync_outbox`/`syncagent`/`/internal/v1/sync/batch` (task 8.1, sudah ada) mengirim
+vehicles_log/payments — kehilangan atau keterlambatan SATU baris tak memengaruhi baris lain,
+dan bisa direkonsiliasi manual belakangan. `audit_logs` beda sifatnya secara mendasar: rantai
+hash (§9.1) membuat SATU entri yang hilang atau tertukar urutan merusak verifikasi kontinuitas
+SEMUA entri sesudahnya bagi Cloud, tanpa jalan rekonsiliasi manual yang sama baiknya. Mencampur
+keduanya ke satu antrean berarti kegagalan/backoff salah satu bisa menahan yang lain — padahal
+keduanya harus bisa gagal & pulih independen.
+
+Karena itu task ini TIDAK menambah tipe Go baru di atas kontrak `outbox.Store`/`Sink` yang
+sudah ada, melainkan jalur paralel penuh sampai ke tabel: `audit_sync_outbox` (migrasi 00008,
+dikunci `node_id`+`seq`, BUKAN `aggregate_id` — audit_logs tak punya "satu ID" yang berarti bagi
+Cloud, yang berarti adalah urutan seq per node), interface `outbox.AuditStore` sendiri, agen
+`internal/auditsync` sendiri (struktur mirip `syncagent` — backoff, dsb. — tapi diduplikasi
+sebagai tipe sendiri, bukan dipaksa ke kontrak lama), endpoint `POST
+/internal/v1/sync/audit-batch` sendiri. `pgstore.Record` menulis baris `audit_logs` DAN
+`audit_sync_outbox` dalam SATU transaksi (sama pola dengan `sync_outbox` untuk vehicles_log,
+P1/D4) — supaya tak pernah ada baris audit tanpa entri sync-nya, atau sebaliknya.
+
+**Beda sengaja lain: `MarkAuditFailed` TAK PERNAH memindahkan status ke `FAILED` permanen**
+(`outbox.AuditPG.MarkAuditFailed`, `internal/outbox/audit.go`), berlawanan dengan
+`outbox.PG.MarkFailed` biasa yang menyerah setelah 5 percobaan. Item audit yang menyerah berarti
+celah PERMANEN di rantai bagi Cloud — semua entri sesudahnya ikut tak terverifikasi selamanya.
+Data bisnis yang gagal terus punya jalan rekonsiliasi manual nanti; audit tidak.
+
+**Cloud tidak percaya begitu saja apa yang masuk.** `services/cloud-api/internal/store/audit.go`
+(`ApplyAuditBatch`) memverifikasi tiap entri terhadap checkpoint rantai node-nya SEBELUM
+menyimpan: seq harus persis `lastSeq+1` (celah DITOLAK, tak diam-diam dilompati — auditsync di
+Edge mengirim ulang tanpa batas sampai celah tertutup, bukan pernah menyerah), `previous_hash`
+harus menyambung ke checkpoint, dan `current_hash` dihitung ULANG dari isi entri (bukan sekadar
+disalin). Retry/duplikat (`seq <= lastSeq`) dilewati idempoten HANYA bila hash-nya identik
+dengan yang sudah tersimpan — kalau beda, itu bukan retry aman, melainkan indikasi
+manipulasi/korupsi, dan ditolak. `GET /api/v1/audit` & `POST /api/v1/audit/verify` yang tadinya
+stub (`verified: true` tanpa memeriksa apa pun) diganti logika nyata: ringkasan kontinuitas per
+node (checkpoint incremental, dipakai tiap sync masuk) dan re-hash penuh dari genesis
+(on-demand, §9.4) — dua mekanisme berbeda dan sengaja tidak disatukan, sama prinsipnya dengan
+K43 (`VerifyChain` pgstore).
+
+**Formula hash sengaja DIDUPLIKASI, bukan diimpor**, di sisi cloud-api
+(`store.computeHash`/`store.canonicalJSON`) dari `internal/audit` (edge-api). Keduanya modul Go
+terpisah (batas layanan §4.2) — memaksa dependensi lintas-modul demi satu fungsi kecil dinilai
+lebih mahal daripada duplikasi yang terdokumentasi jelas. Konsekuensinya eksplisit: kalau
+formula berubah di satu sisi, ia HARUS diubah di sisi lain juga — didokumentasikan di komentar
+berkas `audit.go` cloud-api, bukan diam-diam diasumsikan tetap sinkron.
+
+**Cara diverifikasi** (bukan cuma "kelihatannya benar"): unit test
+`internal/memstore`+`internal/auditsync` (drain/backoff/retry-selamanya/HTTP sink) dan
+`internal/store` cloud-api (rantai kontinu diterima; celah ditolak TANPA menggerakkan
+checkpoint; hash dimanipulasi ditolak; retry identik idempoten; retry dengan isi beda ditolak;
+isolasi tenant) — lalu integrasi `internal/pgstore` terhadap Postgres 16 sungguhan
+(`TestAuditOutboxTransactionalWithAuditLog`, `go test -tags=integration`, termasuk `-race`) —
+lalu ujung-ke-ujung lewat KEDUA biner sungguhan (`edge-api` mode memory ↔ `cloud-api`,
+dijalankan langsung, bukan lewat `go test`): agen sync audit nyala berdampingan dengan agen sync
+biasa tanpa saling menahan, batch valid diterima dan `/api/v1/audit`+`/api/v1/audit/verify`
+melapor benar lewat HTTP sungguhan, dan percobaan mengirim seq yang melompat (celah) ditolak
+tanpa memajukan checkpoint node — diperiksa langsung dari state `/api/v1/audit` setelahnya.
+
+*Sumber: `db/migrations/00008_audit_sync_outbox.sql`, `internal/outbox/audit.go`,
+`internal/pgstore/audit.go`, `internal/memstore/auditoutbox.go`, `internal/auditsync/`,
+`internal/gatesvc/store.go`, `services/cloud-api/internal/store/audit.go`,
+`services/cloud-api/cmd/cloud-api/server.go`.*
+
+---
+
 ## 8. Penyimpangan tercatat dari PRD
 
 Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
@@ -770,6 +836,7 @@ Tempat implementasi sengaja tidak mengikuti spesifikasi, beserta alasannya.
 
 | Tanggal | Perubahan |
 |---|---|
+| 2026-08-19 | K51 ditambahkan (task 8.5 — sync `audit_logs` jalur terpisah dari `sync_outbox` sampai ke lapisan data + Cloud memverifikasi kontinuitas rantai secara kriptografis, bukan menyimpan mentah). |
 | 2026-08-18 | K50 ditambahkan (task 6.1 — klien gRPC nyata ke lpr-svc; server Python dari placeholder jadi benar-benar serve; CI diperbaiki menyentuh grpc sama sekali). |
 | 2026-08-18 | K48–K49 ditambahkan (task 7.4 — rekonsiliasi shift; K49 menemukan bug fixture ID test lewat tabrakan nyata, bukan tinjauan kode). |
 | 2026-08-18 | K47 ditambahkan (task 2.1 — muat gerbang dari tabel `gates`, susulan Epik 5). |

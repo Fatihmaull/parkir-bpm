@@ -53,10 +53,16 @@ type Store struct {
 	txns   map[string]*Txn   // key: aggregate_id (idempotensi §10.3)
 	orders map[string]*Order // key: order_id (provider_ref, idempotensi webhook §6.3)
 	seq    int
+
+	// audit — jalur sync audit_logs TERPISAH (task 8.5), lock sendiri (lihat internal/store/audit.go).
+	audit *auditStore
 }
 
 func New() *Store {
-	return &Store{users: make(map[string]*User), txns: make(map[string]*Txn), orders: make(map[string]*Order)}
+	return &Store{
+		users: make(map[string]*User), txns: make(map[string]*Txn), orders: make(map[string]*Order),
+		audit: newAuditStore(),
+	}
 }
 
 // CreateOrder membuat order PENDING dan mengembalikannya (order_id sebagai provider_ref).

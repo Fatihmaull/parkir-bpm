@@ -72,6 +72,7 @@ type shift struct {
 type Store struct {
 	mu             sync.Mutex
 	now            func() time.Time
+	nodeID         string
 	vehicles       map[string]*vehicle
 	members        map[string]*member // key: rfid uid
 	payments       map[string]*payment
@@ -80,6 +81,8 @@ type Store struct {
 	auditLog       []audit.Entry
 	ticketN        int
 	outbox         *outbox.Mem
+	auditOutbox    map[int64]*auditOutboxItem // jalur sync audit_logs terpisah, task 8.5
+	auditOutboxSeq int64
 	ocrLogs        []OcrLog
 	shifts         map[string]*shift
 	currentShiftID string // "" = tak ada shift terbuka. Satu terminal in-memory = satu shift aktif.
@@ -90,14 +93,16 @@ func New(nodeID string, now func() time.Time) *Store {
 		now = time.Now
 	}
 	return &Store{
-		now:      now,
-		vehicles: make(map[string]*vehicle),
-		members:  make(map[string]*member),
-		payments: make(map[string]*payment),
-		rates:    make(map[string]gate.RateCard),
-		chain:    audit.NewChain(nodeID, 0, ""),
-		outbox:   outbox.NewMem(),
-		shifts:   make(map[string]*shift),
+		now:         now,
+		nodeID:      nodeID,
+		vehicles:    make(map[string]*vehicle),
+		members:     make(map[string]*member),
+		payments:    make(map[string]*payment),
+		rates:       make(map[string]gate.RateCard),
+		chain:       audit.NewChain(nodeID, 0, ""),
+		outbox:      outbox.NewMem(),
+		auditOutbox: make(map[int64]*auditOutboxItem),
+		shifts:      make(map[string]*shift),
 	}
 }
 
@@ -552,6 +557,24 @@ func (s *Store) Record(ctx context.Context, e audit.Event) error {
 		return err
 	}
 	s.auditLog = append(s.auditLog, entry)
+
+	// Jalur sync audit_logs terpisah (task 8.5) — sama seperti pgstore, ditambahkan
+	// BERSAMAAN dengan baris audit itu sendiri (di sini itu berarti sama-sama di bawah
+	// s.mu, in-memory tak butuh transaksi DB untuk atomisitas yang setara).
+	s.auditOutboxSeq++
+	s.auditOutbox[s.auditOutboxSeq] = &auditOutboxItem{
+		seq: entry.Seq,
+		payload: map[string]any{
+			"node_id": entry.NodeID, "seq": entry.Seq,
+			"event_type": entry.Event.EventType, "severity": string(entry.Event.Severity),
+			"actor_id": entry.Event.ActorID, "actor_label": entry.Event.ActorLabel,
+			"actor_role": entry.Event.ActorRole, "gate_label": entry.Event.GateLabel,
+			"summary": entry.Event.Summary, "payload": entry.Event.Payload,
+			"previous_hash": entry.PreviousHash, "current_hash": entry.CurrentHash,
+			"created_at": entry.Event.CreatedAt,
+		},
+		createdAt: s.now(),
+	}
 	return nil
 }
 

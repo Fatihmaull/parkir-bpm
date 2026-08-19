@@ -43,6 +43,9 @@ type Store interface {
 	// ── sync & audit ──
 	Outbox() outbox.Store
 	VerifyChain() (brokenSeq int64, ok bool)
+	// AuditOutbox — jalur sync audit_logs TERPISAH dari Outbox() (task 8.5) — lihat
+	// db/migrations/00008 & internal/outbox/audit.go untuk alasannya.
+	AuditOutbox() outbox.AuditStore
 
 	// ── CRON job logic (§8.3) ──
 	ExpireMemberships(now time.Time) int

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
 
+	"github.com/jabar-creative/parkir/edge-api/internal/auditsync"
 	"github.com/jabar-creative/parkir/edge-api/internal/config"
 	"github.com/jabar-creative/parkir/edge-api/internal/cronjobs"
 	"github.com/jabar-creative/parkir/edge-api/internal/gate"
@@ -163,6 +164,14 @@ func run() error {
 		agent := syncagent.New(store.Outbox(), sink, cfg.SyncBatch)
 		go agent.Run(syncCtx, cfg.SyncTick)
 		slog.Info("sync agent aktif", "endpoint", cfg.SyncEndpoint, "tick", cfg.SyncTick)
+
+		// Sync audit_logs (task 8.5) — jalur TERPISAH dari sync di atas: agen sendiri,
+		// outbox sendiri (audit_sync_outbox), endpoint sendiri. Kegagalan/backoff salah
+		// satu jalur tidak pernah menahan yang lain — lihat internal/auditsync.
+		auditSink := auditsync.NewHTTPSink(cfg.SyncEndpoint, cfg.TenantCode)
+		auditAgent := auditsync.New(store.AuditOutbox(), auditSink, cfg.SyncBatch)
+		go auditAgent.Run(syncCtx, cfg.SyncTick)
+		slog.Info("audit sync agent aktif", "endpoint", cfg.SyncEndpoint, "tick", cfg.SyncTick)
 	} else {
 		slog.Info("sync agent nonaktif (SYNC_CLOUD_ENDPOINT kosong) — mode offline")
 	}
